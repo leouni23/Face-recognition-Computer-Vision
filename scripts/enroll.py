@@ -4,16 +4,15 @@ import argparse
 import sys
 
 import cv2
-import face_recognition
 import numpy as np
 from loguru import logger
 
 from config.settings import get_settings
 from core.camera import CameraStream
-from database.repository import PersonRepository
-from database.session import get_session
+from core.detector import detect_and_encode
 from database.models import Base
-from database.session import engine
+from database.repository import PersonRepository
+from database.session import engine, get_session
 
 _settings = get_settings()
 
@@ -23,12 +22,11 @@ _CONSENT_NOTICE = f"""
 ╠══════════════════════════════════════════════════════════════════╣
 ║  Ai sensi del GDPR (Reg. UE 2016/679), Art. 9:                  ║
 ║                                                                  ║
-║  • Vengono acquisiti dati biometrici (template del volto)        ║
+║  • Vengono acquisiti dati biometrici (embedding ArcFace 512-d)  ║
 ║  • I template sono cifrati con AES-128 + HMAC (Fernet)           ║
 ║  • Nessuna immagine originale viene conservata                   ║
-║  • Conservazione massima: {_settings.data_retention_days} giorni dalla data di iscrizione  ║
+║  • Conservazione massima: {_settings.data_retention_days} giorni                       ║
 ║  • Diritto di cancellazione: scripts/delete_person.py --name ... ║
-║  • Base giuridica: consenso esplicito dell'interessato           ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -43,25 +41,24 @@ def enroll(name: str, num_samples: int = 5, camera_source: str = "0") -> None:
         sys.exit(0)
 
     cam = CameraStream(camera_source).start()
-    encodings: list[np.ndarray] = []
+    embeddings: list[np.ndarray] = []
 
     print(f"\nAcquisizione volto per '{name}'.")
     print(f"Premi SPAZIO per catturare un campione ({num_samples} necessari). Q per annullare.\n")
     cv2.namedWindow("Enrollment — Face ID")
 
-    while len(encodings) < num_samples:
+    while len(embeddings) < num_samples:
         frame = cam.read(timeout=0.5)
         if frame is None:
             continue
 
-        rgb = frame[:, :, ::-1]
-        locs = face_recognition.face_locations(rgb, model="hog")
+        face_data = detect_and_encode(frame)
         display = frame.copy()
 
-        for top, right, bottom, left in locs:
+        for (top, right, bottom, left), _ in face_data:
             cv2.rectangle(display, (left, top), (right, bottom), (34, 197, 94), 2)
 
-        progress = f"Campioni: {len(encodings)}/{num_samples}"
+        progress = f"Campioni: {len(embeddings)}/{num_samples}"
         cv2.putText(display, progress, (8, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (34, 197, 94), 2)
         cv2.imshow("Enrollment — Face ID", display)
         key = cv2.waitKey(1) & 0xFF
@@ -73,21 +70,20 @@ def enroll(name: str, num_samples: int = 5, camera_source: str = "0") -> None:
             sys.exit(0)
 
         if key == ord(" "):
-            if not locs:
+            if not face_data:
                 print("  Nessun volto rilevato. Avvicinati e riprova.")
                 continue
-            if len(locs) > 1:
+            if len(face_data) > 1:
                 print("  Più volti nell'inquadratura. Assicurati di essere solo.")
                 continue
-            encs = face_recognition.face_encodings(rgb, known_face_locations=locs)
-            if encs:
-                encodings.append(encs[0])
-                print(f"  Campione {len(encodings)}/{num_samples} acquisito.")
+            _, embedding = face_data[0]
+            embeddings.append(embedding)
+            print(f"  Campione {len(embeddings)}/{num_samples} acquisito.")
 
     cam.stop()
     cv2.destroyAllWindows()
 
-    mean_encoding = np.mean(encodings, axis=0).astype(np.float32)
+    mean_embedding = np.mean(embeddings, axis=0).astype(np.float32)
 
     with get_session() as session:
         repo = PersonRepository(session)
@@ -97,7 +93,7 @@ def enroll(name: str, num_samples: int = 5, camera_source: str = "0") -> None:
         else:
             person = repo.create(name)
         repo.give_consent(person)
-        repo.add_template(person, mean_encoding)
+        repo.add_template(person, mean_embedding)
 
     logger.success(f"Iscrizione completata per '{name}'.")
     print(f"\n✓ Persona '{name}' iscritta con successo.")

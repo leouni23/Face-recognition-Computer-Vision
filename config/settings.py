@@ -8,7 +8,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://user:password@localhost:5432/face_id"
     biometric_secret_key: str = "change_me_generate_a_random_hex_key"
     camera_sources: str = "0"
-    match_threshold: float = 0.4
+    match_threshold: float = 0.5
+    use_gpu: bool = True
     data_retention_days: int = 365
     log_level: str = "INFO"
 

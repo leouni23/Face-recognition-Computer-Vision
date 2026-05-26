@@ -1,5 +1,5 @@
-"""Thread-safe singleton shared by worker threads (push) and the FastAPI app (read)."""
-import asyncio
+"""Thread-safe frame + event broadcaster for Flask workers."""
+import queue
 import threading
 from datetime import datetime
 from typing import List, Optional
@@ -11,17 +11,11 @@ import numpy as np
 class Broadcaster:
     def __init__(self) -> None:
         self._frame_lock = threading.Lock()
-        self._frames: dict[str, bytes] = {}       # camera_id → JPEG bytes
+        self._frames: dict[str, bytes] = {}
         self._camera_ids: set[str] = set()
 
         self._sub_lock = threading.Lock()
-        self._subscribers: List[asyncio.Queue] = []
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-
-    # --- called once by FastAPI on startup ---
-
-    def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        self._loop = loop
+        self._subscribers: List[queue.Queue] = []
 
     # --- called from worker threads ---
 
@@ -34,8 +28,6 @@ class Broadcaster:
             self._camera_ids.add(camera_id)
 
     def push_event(self, camera_id: str, name: str, confidence: float) -> None:
-        if self._loop is None:
-            return
         event = {
             "camera": camera_id,
             "name": name,
@@ -44,10 +36,12 @@ class Broadcaster:
         }
         with self._sub_lock:
             for q in self._subscribers:
-                # thread-safe bridge into the asyncio event loop
-                self._loop.call_soon_threadsafe(_safe_put, q, event)
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    pass
 
-    # --- called from asyncio (FastAPI) ---
+    # --- called from Flask routes ---
 
     def get_frame(self, camera_id: str) -> Optional[bytes]:
         with self._frame_lock:
@@ -58,25 +52,18 @@ class Broadcaster:
         with self._frame_lock:
             return sorted(self._camera_ids)
 
-    def subscribe(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    def subscribe(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=100)
         with self._sub_lock:
             self._subscribers.append(q)
         return q
 
-    def unsubscribe(self, q: asyncio.Queue) -> None:
+    def unsubscribe(self, q: queue.Queue) -> None:
         with self._sub_lock:
             try:
                 self._subscribers.remove(q)
             except ValueError:
                 pass
-
-
-def _safe_put(q: asyncio.Queue, item: object) -> None:
-    try:
-        q.put_nowait(item)
-    except asyncio.QueueFull:
-        pass
 
 
 broadcaster = Broadcaster()

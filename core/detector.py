@@ -1,29 +1,52 @@
-from typing import List, Tuple
+"""Face detection and embedding via InsightFace (ArcFace).
 
-import cv2
-import face_recognition
+GPU:  set USE_GPU=true  → uses CUDAExecutionProvider (NVIDIA)
+CPU:  set USE_GPU=false → uses CPUExecutionProvider (fallback automatic)
+
+Models are downloaded on first run (~200 MB, cached in ~/.insightface/).
+"""
+from typing import List, Optional, Tuple
+
 import numpy as np
+from loguru import logger
 
-FaceLocation = Tuple[int, int, int, int]  # top, right, bottom, left
+from config.settings import get_settings
 
+FaceLocation = Tuple[int, int, int, int]   # top, right, bottom, left
+FaceData = Tuple[FaceLocation, np.ndarray]  # location + 512-d ArcFace embedding
 
-def detect_faces(
-    frame: np.ndarray, scale: float = 0.5, model: str = "hog"
-) -> List[FaceLocation]:
-    """Detect face bounding boxes on a downscaled copy for real-time performance."""
-    small = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
-    rgb_small = small[:, :, ::-1]  # BGR → RGB (face_recognition expects RGB)
-    locations = face_recognition.face_locations(rgb_small, model=model)
-    inv = 1.0 / scale
-    return [
-        (int(t * inv), int(r * inv), int(b * inv), int(l * inv))
-        for t, r, b, l in locations
-    ]
+_analyzer = None
 
 
-def compute_encodings(
-    frame: np.ndarray, locations: List[FaceLocation]
-) -> List[np.ndarray]:
-    """Compute 128-d face embeddings for each detected location."""
-    rgb = frame[:, :, ::-1]
-    return face_recognition.face_encodings(rgb, known_face_locations=locations)
+def _get_analyzer():
+    global _analyzer
+    if _analyzer is None:
+        from insightface.app import FaceAnalysis
+
+        settings = get_settings()
+        providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if settings.use_gpu
+            else ["CPUExecutionProvider"]
+        )
+        logger.info(f"InsightFace: caricamento modelli (providers={providers})")
+        _analyzer = FaceAnalysis(
+            name="buffalo_l",
+            allowed_modules=["detection", "recognition"],
+            providers=providers,
+        )
+        _analyzer.prepare(ctx_id=0 if settings.use_gpu else -1, det_size=(640, 640))
+        logger.info("InsightFace: modelli pronti")
+    return _analyzer
+
+
+def detect_and_encode(frame: np.ndarray) -> List[FaceData]:
+    """Detect all faces in `frame` and return their locations + ArcFace embeddings."""
+    analyzer = _get_analyzer()
+    faces = analyzer.get(frame)  # expects BGR (same as OpenCV)
+    results: List[FaceData] = []
+    for face in faces:
+        x1, y1, x2, y2 = face.bbox.astype(int)
+        location: FaceLocation = (y1, x2, y2, x1)  # → top, right, bottom, left
+        results.append((location, face.normed_embedding.astype(np.float32)))
+    return results

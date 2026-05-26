@@ -1,12 +1,9 @@
-import asyncio
 import json
+import queue
 import time
 from pathlib import Path
-from typing import List
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from flask import Flask, Response, jsonify, send_from_directory, stream_with_context
 from loguru import logger
 
 from database.models import Person
@@ -16,70 +13,66 @@ from web.broadcaster import broadcaster
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-app = FastAPI(title="Face ID", docs_url=None, redoc_url=None)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-
-@app.on_event("startup")
-async def _startup() -> None:
-    broadcaster.set_loop(asyncio.get_running_loop())
-    logger.info("Web UI disponibile — broadcaster loop registrato")
+app = Flask(__name__, static_folder=str(STATIC_DIR))
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
 
-@app.get("/", include_in_schema=False)
-def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+@app.route("/")
+def index():
+    return send_from_directory(STATIC_DIR, "index.html")
 
 
-# ── Video streams (MJPEG) ─────────────────────────────────────────────────────
+# ── MJPEG stream ──────────────────────────────────────────────────────────────
 
-@app.get("/stream/{camera_id}")
-async def video_stream(camera_id: str) -> StreamingResponse:
-    async def generate():
+@app.route("/stream/<camera_id>")
+def video_stream(camera_id: str):
+    def generate():
         while True:
             jpeg = broadcaster.get_frame(camera_id)
             if jpeg:
-                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
-            await asyncio.sleep(0.04)   # ~25 FPS cap
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                )
+            time.sleep(0.04)   # ~25 FPS cap
 
-    return StreamingResponse(
-        generate(), media_type="multipart/x-mixed-replace; boundary=frame"
-    )
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 # ── Server-Sent Events ────────────────────────────────────────────────────────
 
-@app.get("/api/events")
-async def events_stream(request: Request) -> StreamingResponse:
-    q = broadcaster.subscribe()
-
-    async def generate():
+@app.route("/api/events")
+def events_stream():
+    def generate():
+        q = broadcaster.subscribe()
         try:
             while True:
-                if await request.is_disconnected():
-                    break
                 try:
-                    event = q.get_nowait()
+                    event = q.get(timeout=0.5)
                     yield f"data: {json.dumps(event)}\n\n"
-                except asyncio.QueueEmpty:
+                except queue.Empty:
                     yield ": keepalive\n\n"
-                    await asyncio.sleep(0.5)
+        except GeneratorExit:
+            pass
         finally:
             broadcaster.unsubscribe(q)
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── REST API ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/cameras")
-def list_cameras() -> List[str]:
-    return broadcaster.camera_ids
+@app.route("/api/cameras")
+def list_cameras():
+    return jsonify(broadcaster.camera_ids)
 
 
-@app.get("/api/persons")
+@app.route("/api/persons")
 def list_persons():
     with get_session() as session:
         persons = (
@@ -88,7 +81,7 @@ def list_persons():
             .order_by(Person.name)
             .all()
         )
-        return [
+        return jsonify([
             {
                 "id": p.id,
                 "name": p.name,
@@ -96,14 +89,14 @@ def list_persons():
                 "last_seen": p.last_seen.isoformat() if p.last_seen else None,
             }
             for p in persons
-        ]
+        ])
 
 
-@app.delete("/api/persons/{name}")
+@app.route("/api/persons/<name>", methods=["DELETE"])
 def delete_person(name: str):
     with get_session() as session:
         count = PersonRepository(session).delete_person(name)
     if not count:
-        raise HTTPException(status_code=404, detail=f"Persona '{name}' non trovata")
+        return jsonify({"error": f"Persona '{name}' non trovata"}), 404
     logger.info(f"[API] Dati biometrici di '{name}' eliminati (GDPR Art. 17)")
-    return {"message": f"Persona '{name}' eliminata ({count} record)."}
+    return jsonify({"message": f"Persona '{name}' eliminata ({count} record)."})

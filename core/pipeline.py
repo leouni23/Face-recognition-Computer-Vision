@@ -7,7 +7,7 @@ import numpy as np
 from loguru import logger
 
 from config.settings import get_settings
-from core.detector import FaceLocation, compute_encodings, detect_faces
+from core.detector import FaceLocation, detect_and_encode
 from core.recognizer import FaceRecognizer, Identity
 from database.repository import PersonRepository
 from database.session import get_session
@@ -19,7 +19,7 @@ RecognitionResult = Tuple[FaceLocation, Optional[int], str, float]
 
 class FaceIdPipeline:
     _TEMPLATE_RELOAD_INTERVAL = 60   # seconds between template refreshes
-    _LOG_COOLDOWN = 10               # seconds between DB event writes for the same person
+    _LOG_COOLDOWN = 10               # seconds between DB event writes per person
 
     def __init__(self):
         self._recognizer = FaceRecognizer(threshold=_settings.match_threshold)
@@ -52,17 +52,15 @@ class FaceIdPipeline:
     ) -> List[RecognitionResult]:
         self._reload_templates_if_needed()
 
-        locations = detect_faces(frame, scale=0.5)
-        if not locations:
+        face_data = detect_and_encode(frame)
+        if not face_data:
             return []
 
-        encodings = compute_encodings(frame, locations)
         results: List[RecognitionResult] = []
-
         with get_session() as session:
             repo = PersonRepository(session)
-            for loc, enc in zip(locations, encodings):
-                pid, name, conf = self._recognizer.identify(enc)
+            for loc, embedding in face_data:
+                pid, name, conf = self._recognizer.identify(embedding)
                 if self._should_log(pid):
                     repo.log_event(camera_id, pid, conf)
                     if pid is not None:

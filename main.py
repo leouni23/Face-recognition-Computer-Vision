@@ -21,7 +21,7 @@ from core.pipeline import FaceIdPipeline, RecognitionResult
 from database.models import Base
 from database.session import engine, get_session
 from privacy.retention import run_retention
-from ui.display import annotate_frame, Display
+from ui.display import Display, annotate_frame
 from web.broadcaster import broadcaster
 
 _settings = get_settings()
@@ -46,7 +46,6 @@ def _worker(
     stop_event: threading.Event,
     web_mode: bool,
 ) -> None:
-    """Per-camera worker: runs face recognition and optionally feeds the broadcaster."""
     while not stop_event.is_set():
         frame = cam.read(timeout=0.1)
         if frame is None:
@@ -70,20 +69,18 @@ def _worker(
             result_queue.put((cam.camera_id, frame, results))
 
 
-def _start_web_server(host: str, port: int) -> None:
-    import uvicorn
-    from web.app import app as web_app
-
+def _start_flask(host: str, port: int) -> None:
+    from web.app import app as flask_app
     logger.info(f"Web UI: http://{host}:{port}")
-    uvicorn.run(web_app, host=host, port=port, log_level="warning")
+    flask_app.run(host=host, port=port, threaded=True, use_reloader=False, debug=False)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Face ID")
-    parser.add_argument("--web", action="store_true", help="Avvia la Web UI")
-    parser.add_argument("--local", action="store_true", help="Mostra finestre OpenCV locali (usabile con --web)")
-    parser.add_argument("--host", default="0.0.0.0", help="Host server web (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8000, help="Porta server web (default: 8000)")
+    parser.add_argument("--web", action="store_true", help="Avvia la Web UI (Flask)")
+    parser.add_argument("--local", action="store_true", help="Mostra finestre OpenCV locali")
+    parser.add_argument("--host", default="0.0.0.0", help="Host web (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="Porta web (default: 8000)")
     args = parser.parse_args()
 
     show_local = args.local or not args.web
@@ -118,17 +115,16 @@ def main() -> None:
         w.start()
 
     if args.web:
-        web_thread = threading.Thread(
-            target=_start_web_server, args=(args.host, args.port), daemon=True
-        )
-        web_thread.start()
+        threading.Thread(
+            target=_start_flask, args=(args.host, args.port), daemon=True
+        ).start()
 
     mode = []
     if show_local:
         mode.append("finestre locali")
     if args.web:
-        mode.append(f"web UI http://{args.host}:{args.port}")
-    logger.info(f"Face ID avviato — {len(cameras)} camera/e — {', '.join(mode)}. Premi Q (o Ctrl-C) per uscire.")
+        mode.append(f"web http://{args.host}:{args.port}")
+    logger.info(f"Face ID avviato — {len(cameras)} camera/e — {', '.join(mode)}. Premi Q o Ctrl-C per uscire.")
 
     display = Display() if show_local else None
 
@@ -143,7 +139,6 @@ def main() -> None:
                     except queue.Empty:
                         pass
             else:
-                # Web-only: main thread just waits
                 stop_event.wait(timeout=1.0)
     except KeyboardInterrupt:
         logger.info("Interruzione ricevuta")
