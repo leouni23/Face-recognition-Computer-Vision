@@ -5,12 +5,28 @@ CPU:  set USE_GPU=false → uses CPUExecutionProvider (fallback automatic)
 
 Models are downloaded on first run (~200 MB, cached in ~/.insightface/).
 """
+import os
+import sys
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
 from loguru import logger
 
 from config.settings import get_settings
+
+# On Windows, register CUDA DLL directories installed via pip (nvidia-* packages)
+# so onnxruntime-gpu can find cublasLt64_12.dll, cudart64_12.dll, cudnn64_9.dll etc.
+if sys.platform == "win32":
+    _site = Path(sys.executable).parent / "Lib" / "site-packages" / "nvidia"
+    _cuda_dirs = [
+        str(_site / sub / "bin")
+        for sub in ("cublas", "cuda_runtime", "cuda_nvrtc", "cudnn", "cufft",
+                    "curand", "cusolver", "cusparse", "nvjitlink")
+        if (_site / sub / "bin").is_dir()
+    ]
+    if _cuda_dirs:
+        os.environ["PATH"] = ";".join(_cuda_dirs) + ";" + os.environ.get("PATH", "")
 
 FaceLocation = Tuple[int, int, int, int]   # top, right, bottom, left
 FaceData = Tuple[FaceLocation, np.ndarray]  # location + 512-d ArcFace embedding
