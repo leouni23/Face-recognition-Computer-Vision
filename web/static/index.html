@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Face ID</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #030712; }
+    .event-enter { animation: slideIn 0.25s ease; }
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(-6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    /* MJPEG img fill without letterbox artifacts */
+    .cam-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+    /* Thin scrollbar */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
+  </style>
+</head>
+<body class="text-gray-100 min-h-screen flex flex-col">
+
+  <!-- Header -->
+  <header class="flex items-center gap-3 px-6 py-3 border-b border-gray-800/60 bg-gray-950/80 backdrop-blur sticky top-0 z-10">
+    <div class="w-7 h-7 rounded-lg bg-emerald-500 flex items-center justify-center text-xs font-bold text-white select-none">F</div>
+    <span class="font-semibold text-sm tracking-wide">Face ID</span>
+    <div class="ml-auto flex items-center gap-2 text-xs">
+      <span id="dot" class="w-2 h-2 rounded-full bg-gray-600"></span>
+      <span id="status-text" class="text-gray-500">Connessione...</span>
+    </div>
+  </header>
+
+  <main class="flex-1 p-5 grid grid-cols-1 xl:grid-cols-3 gap-5">
+
+    <!-- Left: camera feeds (span 2 on xl) -->
+    <section class="xl:col-span-2 space-y-3">
+      <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Stream video</h2>
+      <div id="camera-grid" class="grid gap-3">
+        <div class="bg-gray-900 rounded-2xl aspect-video flex items-center justify-center text-gray-600 text-sm" id="cam-placeholder">
+          Caricamento stream...
+        </div>
+      </div>
+    </section>
+
+    <!-- Right: events + persons -->
+    <aside class="space-y-5">
+
+      <!-- Live events -->
+      <section>
+        <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">Riconoscimenti in tempo reale</h2>
+        <div id="event-list" class="space-y-1 max-h-64 overflow-y-auto">
+          <p class="text-xs text-gray-600 px-1">In attesa di eventi...</p>
+        </div>
+      </section>
+
+      <!-- Divider -->
+      <div class="border-t border-gray-800"></div>
+
+      <!-- Persons -->
+      <section>
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Persone iscritte</h2>
+          <button onclick="loadPersons()" class="text-xs text-gray-600 hover:text-gray-400 transition-colors">↻</button>
+        </div>
+        <div id="person-list" class="space-y-1.5"></div>
+      </section>
+
+    </aside>
+  </main>
+
+  <!-- Confirm delete modal -->
+  <div id="modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl p-6 max-w-sm w-full space-y-4">
+      <h3 class="font-semibold">Eliminare i dati biometrici?</h3>
+      <p id="modal-text" class="text-sm text-gray-400"></p>
+      <p class="text-xs text-gray-500">Operazione irreversibile — GDPR Art. 17 (diritto all'oblio)</p>
+      <div class="flex gap-3 justify-end">
+        <button onclick="closeModal()" class="px-4 py-2 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">Annulla</button>
+        <button id="modal-confirm" class="px-4 py-2 text-sm rounded-lg bg-red-600 hover:bg-red-500 transition-colors text-white">Elimina</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ── Cameras ────────────────────────────────────────────────────────────────
+fetch('/api/cameras').then(r => r.json()).then(ids => {
+  const grid = document.getElementById('camera-grid');
+  document.getElementById('cam-placeholder')?.remove();
+
+  if (!ids.length) {
+    grid.innerHTML = '<p class="text-sm text-gray-600 p-2">Nessuna camera attiva.</p>';
+    return;
+  }
+
+  grid.className = 'grid gap-3 ' + (ids.length > 1 ? 'grid-cols-2' : 'grid-cols-1');
+
+  ids.forEach(id => {
+    const wrap = document.createElement('div');
+    wrap.className = 'relative bg-gray-900 rounded-2xl overflow-hidden aspect-video';
+    wrap.innerHTML = `
+      <img class="cam-img" src="/stream/${encodeURIComponent(id)}"
+           onerror="this.style.display='none'" alt="Camera ${id}" />
+      <span class="absolute bottom-2 left-2 text-xs bg-black/50 backdrop-blur px-2 py-0.5 rounded-full text-gray-300">
+        Camera ${id}
+      </span>`;
+    grid.appendChild(wrap);
+  });
+}).catch(() => {
+  document.getElementById('cam-placeholder').textContent = 'Impossibile caricare i feed.';
+});
+
+
+// ── SSE events ─────────────────────────────────────────────────────────────
+const dot  = document.getElementById('dot');
+const stxt = document.getElementById('status-text');
+
+function setStatus(connected) {
+  dot.className  = 'w-2 h-2 rounded-full ' + (connected ? 'bg-emerald-400' : 'bg-red-500');
+  stxt.className = 'text-xs ' + (connected ? 'text-emerald-400' : 'text-red-400');
+  stxt.textContent = connected ? 'Connesso' : 'Disconnesso';
+}
+
+const es = new EventSource('/api/events');
+es.onopen  = () => setStatus(true);
+es.onerror = () => setStatus(false);
+
+es.onmessage = e => {
+  const d = JSON.parse(e.data);
+  const list = document.getElementById('event-list');
+
+  // Remove placeholder
+  const ph = list.querySelector('p');
+  if (ph) ph.remove();
+
+  const known = d.name !== 'Sconosciuto';
+  const div = document.createElement('div');
+  div.className = 'event-enter flex items-center gap-2 text-xs py-1.5 px-2.5 rounded-xl ' +
+                  (known ? 'bg-emerald-950/60 border border-emerald-900/40' : 'bg-gray-900');
+  div.innerHTML = `
+    <span class="w-1.5 h-1.5 rounded-full flex-shrink-0 ${known ? 'bg-emerald-400' : 'bg-gray-600'}"></span>
+    <span class="flex-1 truncate font-medium ${known ? 'text-gray-100' : 'text-gray-500'}">${d.name}</span>
+    ${known ? `<span class="text-emerald-400 font-mono">${(d.confidence*100).toFixed(0)}%</span>` : ''}
+    <span class="text-gray-600 tabular-nums flex-shrink-0">${d.time}</span>`;
+  list.prepend(div);
+  while (list.children.length > 60) list.lastChild.remove();
+};
+
+
+// ── Persons ────────────────────────────────────────────────────────────────
+function loadPersons() {
+  fetch('/api/persons').then(r => r.json()).then(persons => {
+    const list = document.getElementById('person-list');
+    list.innerHTML = '';
+    if (!persons.length) {
+      list.innerHTML = '<p class="text-xs text-gray-600 px-1">Nessuna persona iscritta.</p>';
+      return;
+    }
+    persons.forEach(p => {
+      const lastSeen = p.last_seen
+        ? new Date(p.last_seen).toLocaleString('it-IT', { dateStyle: 'short', timeStyle: 'short' })
+        : 'Mai';
+      const div = document.createElement('div');
+      div.className = 'flex items-center gap-2.5 px-3 py-2 rounded-xl bg-gray-900 hover:bg-gray-800/80 transition-colors';
+      div.innerHTML = `
+        <div class="w-7 h-7 rounded-full bg-emerald-900 text-emerald-300 text-xs flex items-center justify-center font-semibold flex-shrink-0">
+          ${p.name.charAt(0).toUpperCase()}
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium truncate">${p.name}</div>
+          <div class="text-xs text-gray-500">Visto: ${lastSeen}</div>
+        </div>
+        <button onclick="confirmDelete('${p.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}','${p.id}')"
+                class="text-xs text-red-500 hover:text-red-400 px-2 py-1 rounded-lg hover:bg-red-950 transition-colors flex-shrink-0">
+          Elimina
+        </button>`;
+      list.appendChild(div);
+    });
+  }).catch(() => {
+    document.getElementById('person-list').innerHTML =
+      '<p class="text-xs text-red-500 px-1">Errore caricamento persone.</p>';
+  });
+}
+loadPersons();
+setInterval(loadPersons, 15_000);
+
+
+// ── Delete modal ───────────────────────────────────────────────────────────
+let _pendingName = null;
+
+function confirmDelete(name) {
+  _pendingName = name;
+  document.getElementById('modal-text').textContent =
+    `Tutti i template biometrici di "${name}" verranno eliminati definitivamente.`;
+  document.getElementById('modal').classList.remove('hidden');
+}
+function closeModal() {
+  document.getElementById('modal').classList.add('hidden');
+  _pendingName = null;
+}
+document.getElementById('modal-confirm').onclick = () => {
+  if (!_pendingName) return;
+  fetch(`/api/persons/${encodeURIComponent(_pendingName)}`, { method: 'DELETE' })
+    .then(r => r.ok ? r.json() : Promise.reject(r))
+    .then(() => { closeModal(); loadPersons(); })
+    .catch(() => alert('Errore durante l\'eliminazione.'));
+};
+// Close on backdrop click
+document.getElementById('modal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeModal();
+});
+</script>
+</body>
+</html>
