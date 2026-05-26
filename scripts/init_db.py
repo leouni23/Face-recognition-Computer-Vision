@@ -1,5 +1,10 @@
 #!/usr/bin/env python
 """Create all database tables (idempotent)."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from database.models import Base
 from database.session import engine
 from loguru import logger

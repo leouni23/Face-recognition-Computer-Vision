@@ -54,6 +54,7 @@ def _worker(
         results = pipeline.process_frame(frame, cam.camera_id)
 
         if web_mode:
+            broadcaster.push_raw_frame(cam.camera_id, frame)
             annotated = annotate_frame(frame, results)
             broadcaster.push_frame(cam.camera_id, annotated)
             for _, pid, name, conf in results:
@@ -95,6 +96,7 @@ def main() -> None:
 
     cameras = [CameraStream(src).start() for src in _settings.cameras]
     pipeline = FaceIdPipeline()
+    broadcaster.pipeline = pipeline
 
     result_queues: Dict[str, "queue.Queue[_QueueItem]"] = (
         {cam.camera_id: queue.Queue(maxsize=2) for cam in cameras}

@@ -12,7 +12,9 @@ class Broadcaster:
     def __init__(self) -> None:
         self._frame_lock = threading.Lock()
         self._frames: dict[str, bytes] = {}
+        self._raw_frames: dict[str, np.ndarray] = {}
         self._camera_ids: set[str] = set()
+        self.pipeline = None  # set by main.py for forced template reload
 
         self._sub_lock = threading.Lock()
         self._subscribers: List[queue.Queue] = []
@@ -26,6 +28,14 @@ class Broadcaster:
         with self._frame_lock:
             self._frames[camera_id] = buf.tobytes()
             self._camera_ids.add(camera_id)
+
+    def push_raw_frame(self, camera_id: str, frame: np.ndarray) -> None:
+        with self._frame_lock:
+            self._raw_frames[camera_id] = frame
+
+    def get_raw_frame(self, camera_id: str) -> Optional[np.ndarray]:
+        with self._frame_lock:
+            return self._raw_frames.get(camera_id)
 
     def push_event(self, camera_id: str, name: str, confidence: float) -> None:
         event = {

@@ -58,6 +58,42 @@
       <!-- Divider -->
       <div class="border-t border-gray-800"></div>
 
+      <!-- Enrollment -->
+      <section>
+        <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">Registra nuovo volto</h2>
+        <div id="enroll-idle" class="space-y-2">
+          <input id="enroll-name" type="text" placeholder="Il tuo nome..."
+                 class="w-full bg-gray-900 border border-gray-700 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 transition-colors" />
+          <button onclick="enrollStart()"
+                  class="w-full py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold transition-colors">
+            Inizia registrazione
+          </button>
+        </div>
+        <div id="enroll-active" class="hidden space-y-3">
+          <p class="text-sm text-gray-300">Registrazione: <span id="enroll-name-label" class="font-semibold text-emerald-400"></span></p>
+          <div class="flex items-center gap-3">
+            <div class="flex-1 bg-gray-800 rounded-full h-2">
+              <div id="enroll-progress-bar" class="bg-emerald-500 h-2 rounded-full transition-all" style="width:0%"></div>
+            </div>
+            <span id="enroll-progress-text" class="text-xs text-gray-400 tabular-nums w-10 text-right">0/5</span>
+          </div>
+          <p id="enroll-msg" class="text-xs text-gray-500 min-h-[1rem]"></p>
+          <div class="flex gap-2">
+            <button onclick="enrollCapture()" id="enroll-capture-btn"
+                    class="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold transition-colors">
+              Cattura
+            </button>
+            <button onclick="enrollCancel()"
+                    class="px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-sm transition-colors">
+              Annulla
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Divider -->
+      <div class="border-t border-gray-800"></div>
+
       <!-- Persons -->
       <section>
         <div class="flex items-center justify-between mb-2">
@@ -210,6 +246,79 @@ document.getElementById('modal-confirm').onclick = () => {
 document.getElementById('modal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeModal();
 });
+
+
+// ── Enrollment ─────────────────────────────────────────────────────────────
+let _enrollRequired = 5;
+
+function enrollStart() {
+  const name = document.getElementById('enroll-name').value.trim();
+  if (!name) { alert('Inserisci il tuo nome prima di procedere.'); return; }
+  fetch('/api/enroll/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, samples: 5})
+  }).then(r => r.json()).then(d => {
+    if (d.error) { alert(d.error); return; }
+    _enrollRequired = d.required;
+    document.getElementById('enroll-name-label').textContent = name;
+    document.getElementById('enroll-progress-text').textContent = `0/${_enrollRequired}`;
+    document.getElementById('enroll-progress-bar').style.width = '0%';
+    document.getElementById('enroll-msg').textContent = 'Posizionati davanti alla webcam e premi Cattura.';
+    document.getElementById('enroll-idle').classList.add('hidden');
+    document.getElementById('enroll-active').classList.remove('hidden');
+  }).catch(() => alert('Errore di rete.'));
+}
+
+function enrollCapture() {
+  const btn = document.getElementById('enroll-capture-btn');
+  btn.disabled = true;
+  btn.textContent = '...';
+  fetch('/api/enroll/capture', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      btn.disabled = false;
+      btn.textContent = 'Cattura';
+      if (d.error) {
+        document.getElementById('enroll-msg').textContent = '⚠ ' + d.error;
+        return;
+      }
+      const pct = (d.collected / d.required * 100).toFixed(0);
+      document.getElementById('enroll-progress-bar').style.width = pct + '%';
+      document.getElementById('enroll-progress-text').textContent = `${d.collected}/${d.required}`;
+      document.getElementById('enroll-msg').textContent = `Campione ${d.collected}/${d.required} acquisito.`;
+      if (d.done) enrollSave();
+    })
+    .catch(() => {
+      btn.disabled = false;
+      btn.textContent = 'Cattura';
+      document.getElementById('enroll-msg').textContent = '⚠ Errore di rete.';
+    });
+}
+
+function enrollSave() {
+  document.getElementById('enroll-msg').textContent = 'Salvataggio in corso...';
+  fetch('/api/enroll/save', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { alert(d.error); return; }
+      enrollReset();
+      document.getElementById('enroll-name').value = '';
+      loadPersons();
+      alert(d.message + '\nIl riconoscimento è attivo immediatamente.');
+    })
+    .catch(() => alert('Errore durante il salvataggio.'));
+}
+
+function enrollCancel() {
+  fetch('/api/enroll/cancel', {method: 'POST'}).finally(enrollReset);
+}
+
+function enrollReset() {
+  document.getElementById('enroll-idle').classList.remove('hidden');
+  document.getElementById('enroll-active').classList.add('hidden');
+  document.getElementById('enroll-msg').textContent = '';
+}
 </script>
 </body>
 </html>

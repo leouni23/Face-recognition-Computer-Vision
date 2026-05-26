@@ -1,11 +1,14 @@
 import json
 import queue
+import threading
 import time
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, send_from_directory, stream_with_context
+import numpy as np
+from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
 from loguru import logger
 
+from core.detector import detect_and_encode
 from database.models import Person
 from database.repository import PersonRepository
 from database.session import get_session
@@ -14,6 +17,10 @@ from web.broadcaster import broadcaster
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = Flask(__name__, static_folder=str(STATIC_DIR))
+
+# ── Enrollment session (one at a time) ────────────────────────────────────────
+_enroll_lock = threading.Lock()
+_enroll_session: dict = {}  # {"name": str, "embeddings": list[np.ndarray], "required": int}
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
@@ -63,6 +70,92 @@ def events_stream():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── Enrollment API ────────────────────────────────────────────────────────────
+
+@app.route("/api/enroll/start", methods=["POST"])
+def enroll_start():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Campo 'name' obbligatorio"}), 400
+    required = max(1, min(20, int(data.get("samples", 5))))
+    with _enroll_lock:
+        _enroll_session.clear()
+        _enroll_session.update({"name": name, "embeddings": [], "required": required})
+    return jsonify({"message": f"Sessione avviata per '{name}'", "required": required})
+
+
+@app.route("/api/enroll/capture", methods=["POST"])
+def enroll_capture():
+    with _enroll_lock:
+        if not _enroll_session:
+            return jsonify({"error": "Nessuna sessione attiva. Chiama /api/enroll/start prima."}), 400
+        name = _enroll_session["name"]
+        required = _enroll_session["required"]
+        collected = len(_enroll_session["embeddings"])
+
+    # grab the latest raw frame from the first available camera
+    camera_id = (broadcaster.camera_ids or ["0"])[0]
+    frame = broadcaster.get_raw_frame(camera_id)
+    if frame is None:
+        return jsonify({"error": "Nessun frame disponibile dalla camera"}), 503
+
+    faces = detect_and_encode(frame)
+    if not faces:
+        return jsonify({"error": "Nessun volto rilevato. Avvicinati alla camera."}), 422
+    if len(faces) > 1:
+        return jsonify({"error": "Più volti nell'inquadratura. Assicurati di essere solo."}), 422
+
+    _, embedding = faces[0]
+    with _enroll_lock:
+        _enroll_session["embeddings"].append(embedding)
+        collected = len(_enroll_session["embeddings"])
+        done = collected >= required
+
+    return jsonify({"collected": collected, "required": required, "done": done})
+
+
+@app.route("/api/enroll/save", methods=["POST"])
+def enroll_save():
+    with _enroll_lock:
+        if not _enroll_session:
+            return jsonify({"error": "Nessuna sessione attiva"}), 400
+        name = _enroll_session["name"]
+        embeddings = list(_enroll_session["embeddings"])
+
+    if not embeddings:
+        return jsonify({"error": "Nessun campione acquisito"}), 400
+
+    mean_embedding = np.mean(embeddings, axis=0).astype(np.float32)
+
+    with get_session() as session:
+        repo = PersonRepository(session)
+        person = repo.get_by_name(name)
+        if person:
+            action = "aggiornata"
+        else:
+            person = repo.create(name)
+            action = "iscritta"
+        repo.give_consent(person)
+        repo.add_template(person, mean_embedding)
+
+    with _enroll_lock:
+        _enroll_session.clear()
+
+    if broadcaster.pipeline:
+        broadcaster.pipeline.force_reload()
+
+    logger.success(f"[Enrollment web] '{name}' {action} con {len(embeddings)} campioni.")
+    return jsonify({"message": f"Persona '{name}' {action} con successo.", "samples": len(embeddings)})
+
+
+@app.route("/api/enroll/cancel", methods=["POST"])
+def enroll_cancel():
+    with _enroll_lock:
+        _enroll_session.clear()
+    return jsonify({"message": "Sessione annullata"})
 
 
 # ── REST API ──────────────────────────────────────────────────────────────────

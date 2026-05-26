@@ -27,6 +27,9 @@ class FaceIdPipeline:
         self._reload_lock = threading.Lock()
         self._last_logged: Dict[Optional[int], float] = defaultdict(float)
 
+    def force_reload(self) -> None:
+        self._last_reload = 0.0
+
     def _reload_templates_if_needed(self) -> None:
         now = time.monotonic()
         if now - self._last_reload < self._TEMPLATE_RELOAD_INTERVAL:
