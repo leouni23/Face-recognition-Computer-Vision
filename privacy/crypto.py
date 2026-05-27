@@ -1,12 +1,13 @@
 import base64
 import hashlib
+from functools import lru_cache
 
 import numpy as np
 from cryptography.fernet import Fernet
 
 
+@lru_cache(maxsize=1)
 def _fernet(secret: str) -> Fernet:
-    # Derive a 32-byte key from the secret so the key length is always valid for Fernet
     raw = hashlib.sha256(secret.encode("utf-8")).digest()
     return Fernet(base64.urlsafe_b64encode(raw))
 

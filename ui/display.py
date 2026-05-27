@@ -1,4 +1,5 @@
 import time
+from collections import deque
 from typing import List, Optional, Tuple
 
 import cv2
@@ -49,14 +50,10 @@ class Display:
 
 class _FPSCounter:
     def __init__(self, window: int = 30):
-        self._times: list[float] = []
-        self._window = window
+        self._times: deque[float] = deque(maxlen=window)
 
     def tick(self) -> float:
-        now = time.perf_counter()
-        self._times.append(now)
-        if len(self._times) > self._window:
-            self._times.pop(0)
+        self._times.append(time.perf_counter())
         if len(self._times) < 2:
             return 0.0
         return (len(self._times) - 1) / (self._times[-1] - self._times[0])
