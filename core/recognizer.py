@@ -28,7 +28,7 @@ class FaceRecognizer:
 
         best_idx = int(np.argmin(distances))
         best_dist = float(distances[best_idx])
-        confidence = float(max(0.0, 1.0 - best_dist))
+        confidence = float(min(1.0, max(0.0, 1.0 - best_dist)))
 
         if best_dist < self.threshold:
             pid, name, _ = self._templates[best_idx]

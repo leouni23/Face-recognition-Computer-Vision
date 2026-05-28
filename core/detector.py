@@ -7,6 +7,7 @@ Models are downloaded on first run (~200 MB, cached in ~/.insightface/).
 """
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -17,42 +18,44 @@ from config.settings import get_settings
 
 # On Windows, register CUDA DLL directories installed via pip (nvidia-* packages)
 # so onnxruntime-gpu can find cublasLt64_12.dll, cudart64_12.dll, cudnn64_9.dll etc.
+# os.add_dll_directory() is the correct Python 3.8+ API for DLL search path isolation.
 if sys.platform == "win32":
     _site = Path(sys.executable).parent / "Lib" / "site-packages" / "nvidia"
-    _cuda_dirs = [
-        str(_site / sub / "bin")
-        for sub in ("cublas", "cuda_runtime", "cuda_nvrtc", "cudnn", "cufft",
-                    "curand", "cusolver", "cusparse", "nvjitlink")
-        if (_site / sub / "bin").is_dir()
-    ]
-    if _cuda_dirs:
-        os.environ["PATH"] = ";".join(_cuda_dirs) + ";" + os.environ.get("PATH", "")
+    for _sub in ("cublas", "cuda_runtime", "cuda_nvrtc", "cudnn", "cufft",
+                 "curand", "cusolver", "cusparse", "nvjitlink"):
+        _d = _site / _sub / "bin"
+        if _d.is_dir():
+            os.add_dll_directory(str(_d))
 
 FaceLocation = Tuple[int, int, int, int]   # top, right, bottom, left
 FaceData = Tuple[FaceLocation, np.ndarray]  # location + 512-d ArcFace embedding
 
 _analyzer = None
+_analyzer_lock = threading.Lock()
 
 
 def _get_analyzer():
     global _analyzer
     if _analyzer is None:
-        from insightface.app import FaceAnalysis
+        with _analyzer_lock:
+            if _analyzer is None:
+                from insightface.app import FaceAnalysis
 
-        settings = get_settings()
-        providers = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if settings.use_gpu
-            else ["CPUExecutionProvider"]
-        )
-        logger.info(f"InsightFace: caricamento modelli (providers={providers})")
-        _analyzer = FaceAnalysis(
-            name="buffalo_l",
-            allowed_modules=["detection", "recognition"],
-            providers=providers,
-        )
-        _analyzer.prepare(ctx_id=0 if settings.use_gpu else -1, det_size=(640, 640))
-        logger.info("InsightFace: modelli pronti")
+                settings = get_settings()
+                providers = (
+                    ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                    if settings.use_gpu
+                    else ["CPUExecutionProvider"]
+                )
+                logger.info(f"InsightFace: caricamento modelli (providers={providers})")
+                instance = FaceAnalysis(
+                    name="buffalo_l",
+                    allowed_modules=["detection", "recognition"],
+                    providers=providers,
+                )
+                instance.prepare(ctx_id=0 if settings.use_gpu else -1, det_size=(640, 640))
+                logger.info("InsightFace: modelli pronti")
+                _analyzer = instance
     return _analyzer
 
 

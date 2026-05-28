@@ -87,6 +87,7 @@ def enroll(name: str, num_samples: int = 5, camera_source: str = "0") -> None:
     cv2.destroyAllWindows()
 
     mean_embedding = np.mean(embeddings, axis=0).astype(np.float32)
+    mean_embedding /= np.linalg.norm(mean_embedding)
 
     with get_session() as session:
         repo = PersonRepository(session)

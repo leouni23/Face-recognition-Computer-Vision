@@ -129,6 +129,7 @@ def enroll_save():
         return jsonify({"error": "Nessun campione acquisito"}), 400
 
     mean_embedding = np.mean(embeddings, axis=0).astype(np.float32)
+    mean_embedding /= np.linalg.norm(mean_embedding)
 
     with get_session() as session:
         repo = PersonRepository(session)
