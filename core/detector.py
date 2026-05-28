@@ -18,14 +18,18 @@ from config.settings import get_settings
 
 # On Windows, register CUDA DLL directories installed via pip (nvidia-* packages)
 # so onnxruntime-gpu can find cublasLt64_12.dll, cudart64_12.dll, cudnn64_9.dll etc.
-# os.add_dll_directory() is the correct Python 3.8+ API for DLL search path isolation.
+# onnxruntime-gpu's C++ loader resolves CUDA DLLs via PATH (not the Python DLL list),
+# so PATH mutation is required here — os.add_dll_directory() alone is insufficient.
 if sys.platform == "win32":
     _site = Path(sys.executable).parent / "Lib" / "site-packages" / "nvidia"
-    for _sub in ("cublas", "cuda_runtime", "cuda_nvrtc", "cudnn", "cufft",
-                 "curand", "cusolver", "cusparse", "nvjitlink"):
-        _d = _site / _sub / "bin"
-        if _d.is_dir():
-            os.add_dll_directory(str(_d))
+    _cuda_dirs = [
+        str(_site / sub / "bin")
+        for sub in ("cublas", "cuda_runtime", "cuda_nvrtc", "cudnn", "cufft",
+                    "curand", "cusolver", "cusparse", "nvjitlink")
+        if (_site / sub / "bin").is_dir()
+    ]
+    if _cuda_dirs:
+        os.environ["PATH"] = ";".join(_cuda_dirs) + ";" + os.environ.get("PATH", "")
 
 FaceLocation = Tuple[int, int, int, int]   # top, right, bottom, left
 FaceData = Tuple[FaceLocation, np.ndarray]  # location + 512-d ArcFace embedding
