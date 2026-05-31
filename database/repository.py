@@ -5,7 +5,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from config.settings import get_settings
-from database.models import FaceTemplate, Person, RecognitionEvent
+from database.models import FaceTemplate, Person, PositionLog, RecognitionEvent
 from privacy.crypto import decrypt_embedding, encrypt_embedding
 
 _settings = get_settings()
@@ -70,6 +70,49 @@ class PersonRepository:
             camera_id=camera_id, person_id=person_id, confidence=confidence
         )
         self.session.add(event)
+
+    def log_position(
+        self,
+        camera_id: str,
+        person_id: int,
+        location: Tuple[int, int, int, int],
+        confidence: float,
+        frame_shape: Optional[Tuple[int, ...]] = None,
+    ) -> None:
+        """Persist a position point (bounding-box centre + size) for an identified subject.
+
+        Coordinates arrive as numpy ints (face.bbox.astype(int)); cast to native
+        Python types so the sqlite3 driver stores them as INTEGER, not BLOB.
+        """
+        top, right, bottom, left = (int(v) for v in location)
+        frame_h, frame_w = (
+            (int(frame_shape[0]), int(frame_shape[1])) if frame_shape is not None else (None, None)
+        )
+        self.session.add(
+            PositionLog(
+                person_id=person_id,
+                camera_id=camera_id,
+                bbox_cx=(left + right) // 2,
+                bbox_cy=(top + bottom) // 2,
+                bbox_w=right - left,
+                bbox_h=bottom - top,
+                frame_w=frame_w,
+                frame_h=frame_h,
+                confidence=float(confidence),
+            )
+        )
+
+    def get_trajectory(
+        self,
+        person_id: int,
+        since: Optional[datetime] = None,
+        limit: int = 5000,
+    ) -> List[PositionLog]:
+        """Return a subject's saved positions, oldest first, optionally since a timestamp."""
+        query = self.session.query(PositionLog).filter(PositionLog.person_id == person_id)
+        if since is not None:
+            query = query.filter(PositionLog.timestamp >= since)
+        return query.order_by(PositionLog.timestamp).limit(limit).all()
 
     def delete_person(self, name: str) -> int:
         count = (

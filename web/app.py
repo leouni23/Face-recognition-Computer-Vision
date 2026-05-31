@@ -2,6 +2,7 @@ import json
 import queue
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -194,3 +195,30 @@ def delete_person(name: str):
         return jsonify({"error": f"Persona '{name}' non trovata"}), 404
     logger.info(f"[API] Dati biometrici di '{name}' eliminati (GDPR Art. 17)")
     return jsonify({"message": f"Persona '{name}' eliminata ({count} record)."})
+
+
+@app.route("/api/persons/<int:person_id>/trajectory")
+def person_trajectory(person_id: int):
+    """Storico posizioni di un soggetto. Query param opzionale ?minutes=N (default 60)."""
+    try:
+        minutes = max(1, min(1440, int(request.args.get("minutes", 60))))
+    except (TypeError, ValueError):
+        minutes = 60
+    since = datetime.utcnow() - timedelta(minutes=minutes)
+
+    with get_session() as session:
+        points = PersonRepository(session).get_trajectory(person_id, since=since)
+        return jsonify([
+            {
+                "camera": p.camera_id,
+                "time": p.timestamp.isoformat(),
+                "cx": p.bbox_cx,
+                "cy": p.bbox_cy,
+                "w": p.bbox_w,
+                "h": p.bbox_h,
+                "frame_w": p.frame_w,
+                "frame_h": p.frame_h,
+                "confidence": p.confidence,
+            }
+            for p in points
+        ])

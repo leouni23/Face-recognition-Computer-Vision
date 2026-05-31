@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     match_threshold: float = 0.5
     use_gpu: bool = True
     data_retention_days: int = 365
+    position_log_interval: float = 1.0  # seconds between saved position points per person/camera
     log_level: str = "INFO"
 
     @property

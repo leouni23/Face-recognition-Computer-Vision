@@ -119,6 +119,33 @@
     </div>
   </div>
 
+  <!-- Trajectory history modal -->
+  <div id="traj-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl p-5 max-w-3xl w-full space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between">
+        <h3 class="font-semibold">Storico posizioni — <span id="traj-name" class="text-sky-400"></span></h3>
+        <button onclick="closeTraj()" class="text-gray-500 hover:text-gray-300 text-lg leading-none px-1">✕</button>
+      </div>
+      <div class="flex items-center gap-2 text-xs">
+        <span class="text-gray-500">Intervallo:</span>
+        <select id="traj-range" onchange="reloadTraj()"
+                class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 focus:outline-none focus:border-sky-500">
+          <option value="15">15 min</option>
+          <option value="60" selected>1 ora</option>
+          <option value="360">6 ore</option>
+          <option value="1440">24 ore</option>
+        </select>
+        <span id="traj-summary" class="text-gray-500 ml-auto tabular-nums"></span>
+      </div>
+      <div id="traj-body" class="space-y-4">
+        <p class="text-xs text-gray-600">Caricamento...</p>
+      </div>
+      <p class="text-[11px] text-gray-600">
+        Posizione = centro del volto nel frame (pixel). Linea blu→verde = dal pi&ugrave; vecchio al pi&ugrave; recente.
+      </p>
+    </div>
+  </div>
+
 <script>
 // ── Cameras ────────────────────────────────────────────────────────────────
 fetch('/api/cameras').then(r => r.json()).then(ids => {
@@ -207,6 +234,10 @@ function loadPersons() {
           <div class="text-sm font-medium truncate">${p.name}</div>
           <div class="text-xs text-gray-500">Visto: ${lastSeen}</div>
         </div>
+        <button onclick="showTrajectory(${p.id}, '${p.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}')"
+                class="text-xs text-sky-400 hover:text-sky-300 px-2 py-1 rounded-lg hover:bg-sky-950 transition-colors flex-shrink-0">
+          Storico
+        </button>
         <button onclick="confirmDelete('${p.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}','${p.id}')"
                 class="text-xs text-red-500 hover:text-red-400 px-2 py-1 rounded-lg hover:bg-red-950 transition-colors flex-shrink-0">
           Elimina
@@ -319,6 +350,99 @@ function enrollReset() {
   document.getElementById('enroll-active').classList.add('hidden');
   document.getElementById('enroll-msg').textContent = '';
 }
+
+
+// ── Trajectory history ───────────────────────────────────────────────────────
+let _trajPersonId = null;
+
+function showTrajectory(id, name) {
+  _trajPersonId = id;
+  document.getElementById('traj-name').textContent = name;
+  document.getElementById('traj-range').value = '60';
+  document.getElementById('traj-modal').classList.remove('hidden');
+  reloadTraj();
+}
+function closeTraj() {
+  document.getElementById('traj-modal').classList.add('hidden');
+  _trajPersonId = null;
+}
+function reloadTraj() {
+  if (_trajPersonId == null) return;
+  const minutes = document.getElementById('traj-range').value;
+  const body = document.getElementById('traj-body');
+  body.innerHTML = '<p class="text-xs text-gray-600">Caricamento...</p>';
+  document.getElementById('traj-summary').textContent = '';
+  fetch(`/api/persons/${_trajPersonId}/trajectory?minutes=${minutes}`)
+    .then(r => r.json())
+    .then(renderTrajectory)
+    .catch(() => { body.innerHTML = '<p class="text-xs text-red-500">Errore caricamento storico.</p>'; });
+}
+
+function renderTrajectory(points) {
+  const body = document.getElementById('traj-body');
+  body.innerHTML = '';
+  if (!points.length) {
+    body.innerHTML = '<p class="text-xs text-gray-600">Nessuna posizione registrata in questo intervallo.</p>';
+    return;
+  }
+
+  // Group points by camera (cross-camera tracking: same person_id across cameras)
+  const byCam = {};
+  points.forEach(p => { (byCam[p.camera] = byCam[p.camera] || []).push(p); });
+
+  const times = points.map(p => new Date(p.time));
+  const fmt = d => d.toLocaleString('it-IT', { dateStyle: 'short', timeStyle: 'medium' });
+  document.getElementById('traj-summary').textContent =
+    `${points.length} punti · ${fmt(times[0])} → ${times[times.length - 1].toLocaleTimeString('it-IT')}`;
+
+  Object.entries(byCam).forEach(([cam, pts]) => {
+    const fw = pts[0].frame_w || 640, fh = pts[0].frame_h || 480;
+    const wrap = document.createElement('div');
+    const head = document.createElement('div');
+    head.className = 'text-xs text-gray-400 mb-1';
+    head.textContent = `Camera ${cam} — ${pts.length} punti`;
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = Math.round(640 * fh / fw);
+    canvas.className = 'w-full rounded-xl bg-gray-950 border border-gray-800';
+    wrap.appendChild(head);
+    wrap.appendChild(canvas);
+    body.appendChild(wrap);
+    drawPath(canvas, pts, fw, fh);
+  });
+}
+
+function drawPath(canvas, pts, fw, fh) {
+  const ctx = canvas.getContext('2d');
+  const sx = canvas.width / fw, sy = canvas.height / fh;
+
+  // Polyline oldest→newest with a blue→emerald gradient
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  for (let i = 1; i < pts.length; i++) {
+    const t = i / (pts.length - 1);
+    ctx.strokeStyle = `hsl(${210 - 58 * t}, 75%, ${45 + 15 * t}%)`;
+    ctx.beginPath();
+    ctx.moveTo(pts[i - 1].cx * sx, pts[i - 1].cy * sy);
+    ctx.lineTo(pts[i].cx * sx, pts[i].cy * sy);
+    ctx.stroke();
+  }
+
+  // Markers: start (grey) and current (emerald)
+  const first = pts[0], last = pts[pts.length - 1];
+  marker(ctx, first.cx * sx, first.cy * sy, '#9ca3af');
+  marker(ctx, last.cx * sx, last.cy * sy, '#34d399');
+}
+function marker(ctx, x, y, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, 5, 0, 2 * Math.PI);
+  ctx.fill();
+}
+
+document.getElementById('traj-modal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeTraj();
+});
 </script>
 </body>
 </html>

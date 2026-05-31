@@ -26,6 +26,7 @@ class FaceIdPipeline:
         self._last_reload = 0.0
         self._reload_lock = threading.Lock()
         self._last_logged: Dict[Optional[int], float] = defaultdict(float)
+        self._last_position: Dict[Tuple[str, int], float] = defaultdict(float)
 
     def force_reload(self) -> None:
         self._last_reload = 0.0
@@ -50,6 +51,14 @@ class FaceIdPipeline:
             return True
         return False
 
+    def _should_log_position(self, camera_id: str, person_id: int) -> bool:
+        now = time.monotonic()
+        key = (camera_id, person_id)
+        if now - self._last_position[key] > _settings.position_log_interval:
+            self._last_position[key] = now
+            return True
+        return False
+
     def process_frame(
         self, frame: np.ndarray, camera_id: str
     ) -> List[RecognitionResult]:
@@ -68,6 +77,8 @@ class FaceIdPipeline:
                     repo.log_event(camera_id, pid, conf)
                     if pid is not None:
                         repo.update_last_seen(pid)
+                if pid is not None and self._should_log_position(camera_id, pid):
+                    repo.log_position(camera_id, pid, loc, conf, frame.shape)
                 results.append((loc, pid, name, conf))
 
         return results
