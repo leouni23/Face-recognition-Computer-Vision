@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from collections import defaultdict
@@ -8,8 +9,9 @@ from loguru import logger
 
 from config.settings import get_settings
 from core.detector import FaceLocation, detect_and_encode
+from core.geometry import project_point
 from core.recognizer import FaceRecognizer, Identity
-from database.repository import PersonRepository
+from database.repository import CalibrationRepository, PersonRepository
 from database.session import get_session
 
 _settings = get_settings()
@@ -27,6 +29,7 @@ class FaceIdPipeline:
         self._reload_lock = threading.Lock()
         self._last_logged: Dict[Optional[int], float] = defaultdict(float)
         self._last_position: Dict[Tuple[str, int], float] = defaultdict(float)
+        self._homographies: Dict[str, np.ndarray] = {}
 
     def force_reload(self) -> None:
         self._last_reload = 0.0
@@ -40,9 +43,18 @@ class FaceIdPipeline:
                 return
             with get_session() as session:
                 templates = PersonRepository(session).load_all_templates()
+                calibs = CalibrationRepository(session).get_all()
+                homographies = {
+                    c.camera_id: np.array(json.loads(c.homography_json), dtype=np.float64)
+                    for c in calibs
+                }
             self._recognizer.load(templates)
+            self._homographies = homographies
             self._last_reload = now
-            logger.debug(f"Template ricaricati: {len(templates)} persona/e")
+            logger.debug(
+                f"Template ricaricati: {len(templates)} persona/e, "
+                f"{len(homographies)} camera/e calibrate"
+            )
 
     def _should_log(self, person_id: Optional[int]) -> bool:
         now = time.monotonic()
@@ -78,7 +90,13 @@ class FaceIdPipeline:
                     if pid is not None:
                         repo.update_last_seen(pid)
                 if pid is not None and self._should_log_position(camera_id, pid):
-                    repo.log_position(camera_id, pid, loc, conf, frame.shape)
+                    world = None
+                    H = self._homographies.get(camera_id)
+                    if H is not None:
+                        top, right, bottom, left = loc
+                        # project bbox bottom-centre (closest to the floor plane)
+                        world = project_point(H, (left + right) / 2.0, float(bottom))
+                    repo.log_position(camera_id, pid, loc, conf, frame.shape, world=world)
                 results.append((loc, pid, name, conf))
 
         return results

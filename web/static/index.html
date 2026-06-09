@@ -26,10 +26,12 @@
   <header class="flex items-center gap-3 px-6 py-3 border-b border-gray-800/60 bg-gray-950/80 backdrop-blur sticky top-0 z-10">
     <div class="w-7 h-7 rounded-lg bg-emerald-500 flex items-center justify-center text-xs font-bold text-white select-none">F</div>
     <span class="font-semibold text-sm tracking-wide">Face ID</span>
-    <div class="ml-auto flex items-center gap-2 text-xs">
+    <nav class="ml-auto flex items-center gap-3 text-xs">
+      <button onclick="openMap()" class="px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">Mappa</button>
+      <a href="/calibrate" class="px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">Calibra</a>
       <span id="dot" class="w-2 h-2 rounded-full bg-gray-600"></span>
       <span id="status-text" class="text-gray-500">Connessione...</span>
-    </div>
+    </nav>
   </header>
 
   <main class="flex-1 p-5 grid grid-cols-1 xl:grid-cols-3 gap-5">
@@ -146,7 +148,30 @@
     </div>
   </div>
 
+  <!-- Live map modal -->
+  <div id="map-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl p-5 max-w-4xl w-full space-y-3 max-h-[92vh] overflow-y-auto">
+      <div class="flex items-center justify-between">
+        <h3 class="font-semibold">Mappa — posizioni in tempo reale</h3>
+        <button onclick="closeMap()" class="text-gray-500 hover:text-gray-300 text-lg leading-none px-1">✕</button>
+      </div>
+      <div id="map-empty" class="hidden text-sm text-gray-400">
+        Nessuna planimetria caricata. Vai su <a href="/calibrate" class="text-sky-400 underline">Calibra</a>
+        per caricarla e calibrare le camere.
+      </div>
+      <canvas id="map-canvas" class="w-full rounded-xl bg-gray-950 border border-gray-800"></canvas>
+      <p id="map-info" class="text-xs text-gray-500"></p>
+      <p class="text-[11px] text-gray-600">
+        Posizione approssimata (proiezione del volto sul piano del pavimento). Solo camere calibrate.
+      </p>
+    </div>
+  </div>
+
 <script>
+// HTML-escape per ogni valore dinamico interpolato in innerHTML (anti-XSS)
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
 // ── Cameras ────────────────────────────────────────────────────────────────
 fetch('/api/cameras').then(r => r.json()).then(ids => {
   const grid = document.getElementById('camera-grid');
@@ -164,9 +189,9 @@ fetch('/api/cameras').then(r => r.json()).then(ids => {
     wrap.className = 'relative bg-gray-900 rounded-2xl overflow-hidden aspect-video';
     wrap.innerHTML = `
       <img class="cam-img" src="/stream/${encodeURIComponent(id)}"
-           onerror="this.style.display='none'" alt="Camera ${id}" />
+           onerror="this.style.display='none'" alt="Camera ${esc(id)}" />
       <span class="absolute bottom-2 left-2 text-xs bg-black/50 backdrop-blur px-2 py-0.5 rounded-full text-gray-300">
-        Camera ${id}
+        Camera ${esc(id)}
       </span>`;
     grid.appendChild(wrap);
   });
@@ -203,9 +228,9 @@ es.onmessage = e => {
                   (known ? 'bg-emerald-950/60 border border-emerald-900/40' : 'bg-gray-900');
   div.innerHTML = `
     <span class="w-1.5 h-1.5 rounded-full flex-shrink-0 ${known ? 'bg-emerald-400' : 'bg-gray-600'}"></span>
-    <span class="flex-1 truncate font-medium ${known ? 'text-gray-100' : 'text-gray-500'}">${d.name}</span>
+    <span class="flex-1 truncate font-medium ${known ? 'text-gray-100' : 'text-gray-500'}">${esc(d.name)}</span>
     ${known ? `<span class="text-emerald-400 font-mono">${(d.confidence*100).toFixed(0)}%</span>` : ''}
-    <span class="text-gray-600 tabular-nums flex-shrink-0">${d.time}</span>`;
+    <span class="text-gray-600 tabular-nums flex-shrink-0">${esc(d.time)}</span>`;
   list.prepend(div);
   while (list.children.length > 60) list.lastChild.remove();
 };
@@ -228,20 +253,22 @@ function loadPersons() {
       div.className = 'flex items-center gap-2.5 px-3 py-2 rounded-xl bg-gray-900 hover:bg-gray-800/80 transition-colors';
       div.innerHTML = `
         <div class="w-7 h-7 rounded-full bg-emerald-900 text-emerald-300 text-xs flex items-center justify-center font-semibold flex-shrink-0">
-          ${p.name.charAt(0).toUpperCase()}
+          ${esc(p.name.charAt(0).toUpperCase())}
         </div>
         <div class="flex-1 min-w-0">
-          <div class="text-sm font-medium truncate">${p.name}</div>
-          <div class="text-xs text-gray-500">Visto: ${lastSeen}</div>
-        </div>
-        <button onclick="showTrajectory(${p.id}, '${p.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}')"
-                class="text-xs text-sky-400 hover:text-sky-300 px-2 py-1 rounded-lg hover:bg-sky-950 transition-colors flex-shrink-0">
-          Storico
-        </button>
-        <button onclick="confirmDelete('${p.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}','${p.id}')"
-                class="text-xs text-red-500 hover:text-red-400 px-2 py-1 rounded-lg hover:bg-red-950 transition-colors flex-shrink-0">
-          Elimina
-        </button>`;
+          <div class="text-sm font-medium truncate">${esc(p.name)}</div>
+          <div class="text-xs text-gray-500">Visto: ${esc(lastSeen)}</div>
+        </div>`;
+      const trajBtn = document.createElement('button');
+      trajBtn.textContent = 'Storico';
+      trajBtn.className = 'text-xs text-sky-400 hover:text-sky-300 px-2 py-1 rounded-lg hover:bg-sky-950 transition-colors flex-shrink-0';
+      trajBtn.addEventListener('click', () => showTrajectory(p.id, p.name));
+      const delBtn = document.createElement('button');
+      delBtn.textContent = 'Elimina';
+      delBtn.className = 'text-xs text-red-500 hover:text-red-400 px-2 py-1 rounded-lg hover:bg-red-950 transition-colors flex-shrink-0';
+      delBtn.addEventListener('click', () => confirmDelete(p.name));
+      div.appendChild(trajBtn);
+      div.appendChild(delBtn);
       list.appendChild(div);
     });
   }).catch(() => {
@@ -442,6 +469,63 @@ function marker(ctx, x, y, color) {
 
 document.getElementById('traj-modal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeTraj();
+});
+
+
+// ── Live map ──────────────────────────────────────────────────────────────────
+let _mapTimer = null;
+let _mapImg = null;
+
+function openMap() {
+  document.getElementById('map-modal').classList.remove('hidden');
+  fetch('/api/map').then(r => r.json()).then(d => {
+    const empty = document.getElementById('map-empty');
+    const canvas = document.getElementById('map-canvas');
+    if (!d.exists) {
+      empty.classList.remove('hidden');
+      canvas.classList.add('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    canvas.classList.remove('hidden');
+    _mapImg = new Image();
+    _mapImg.onload = () => {
+      canvas.width = _mapImg.naturalWidth;
+      canvas.height = _mapImg.naturalHeight;
+      pollMap();
+      _mapTimer = setInterval(pollMap, 2000);
+    };
+    _mapImg.src = d.url;
+  });
+}
+function closeMap() {
+  document.getElementById('map-modal').classList.add('hidden');
+  if (_mapTimer) { clearInterval(_mapTimer); _mapTimer = null; }
+}
+function pollMap() {
+  fetch('/api/positions/map?minutes=5').then(r => r.json()).then(drawMap).catch(() => {});
+}
+function drawMap(people) {
+  const canvas = document.getElementById('map-canvas');
+  const ctx = canvas.getContext('2d');
+  if (_mapImg) ctx.drawImage(_mapImg, 0, 0, canvas.width, canvas.height);
+  const r = Math.max(6, canvas.width / 90);
+  people.forEach(p => {
+    ctx.beginPath();
+    ctx.fillStyle = 'rgba(16,185,129,.9)';
+    ctx.arc(p.world_x, p.world_y, r, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#022c22'; ctx.stroke();
+    ctx.fillStyle = '#d1fae5';
+    ctx.font = `${Math.round(r * 1.6)}px sans-serif`;
+    ctx.fillText(p.name, p.world_x + r + 3, p.world_y + r / 2);
+  });
+  document.getElementById('map-info').textContent = people.length
+    ? `${people.length} soggetto/i sulla mappa`
+    : 'Nessun soggetto rilevato (ultimi 5 min) su camere calibrate.';
+}
+document.getElementById('map-modal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeMap();
 });
 </script>
 </body>

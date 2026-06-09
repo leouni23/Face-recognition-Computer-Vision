@@ -55,8 +55,9 @@ def _worker(
 
         if web_mode:
             broadcaster.push_raw_frame(cam.camera_id, frame)
-            annotated = annotate_frame(frame, results)
-            broadcaster.push_frame(cam.camera_id, annotated)
+            if broadcaster.has_viewers(cam.camera_id):
+                annotated = annotate_frame(frame, results)
+                broadcaster.push_frame(cam.camera_id, annotated)
             for _, pid, name, conf in results:
                 if pid is not None:
                     broadcaster.push_event(cam.camera_id, name, conf)
@@ -80,13 +81,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Face ID")
     parser.add_argument("--web", action="store_true", help="Avvia la Web UI (Flask)")
     parser.add_argument("--local", action="store_true", help="Mostra finestre OpenCV locali")
-    parser.add_argument("--host", default="0.0.0.0", help="Host web (default: 0.0.0.0)")
+    parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="Host web (default: 127.0.0.1 — usa 0.0.0.0 per esporre sulla LAN, con WEB_PASSWORD impostata)",
+    )
     parser.add_argument("--port", type=int, default=8000, help="Porta web (default: 8000)")
     args = parser.parse_args()
 
     show_local = args.local or not args.web
 
     _setup_logging()
+
+    if args.web and args.host not in ("127.0.0.1", "localhost", "::1") and not _settings.web_password:
+        logger.warning(
+            f"Web UI esposta su {args.host} SENZA autenticazione: chiunque sulla rete può vedere "
+            "le camere e gestire i dati biometrici. Imposta WEB_PASSWORD nel file .env"
+        )
+
     Base.metadata.create_all(engine)
 
     with get_session() as session:

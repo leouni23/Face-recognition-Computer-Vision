@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Calibrazione camere — Face ID</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #030712; }
+    .img-wrap { position: relative; display: block; line-height: 0; }
+    .img-wrap img { width: 100%; height: auto; border-radius: 0.75rem; cursor: crosshair; }
+    .pt {
+      position: absolute; transform: translate(-50%, -50%);
+      width: 22px; height: 22px; border-radius: 9999px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; color: #fff;
+      border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.6); pointer-events: none;
+    }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+  </style>
+</head>
+<body class="text-gray-100 min-h-screen">
+
+  <header class="flex items-center gap-3 px-6 py-3 border-b border-gray-800/60 bg-gray-950/80 sticky top-0 z-10">
+    <a href="/" class="text-gray-500 hover:text-gray-300 text-sm">← Face ID</a>
+    <span class="font-semibold text-sm tracking-wide ml-2">Calibrazione camere → planimetria</span>
+  </header>
+
+  <main class="p-5 max-w-6xl mx-auto space-y-6">
+
+    <!-- Step 1: floor plan -->
+    <section class="space-y-2">
+      <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">1 · Planimetria</h2>
+      <div id="map-status" class="text-sm text-gray-400">Controllo planimetria...</div>
+      <label class="inline-flex items-center gap-2 text-sm cursor-pointer">
+        <span class="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">Carica / cambia planimetria</span>
+        <input id="map-file" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" />
+      </label>
+    </section>
+
+    <!-- Step 2: camera -->
+    <section class="space-y-2">
+      <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">2 · Camera</h2>
+      <div id="camera-buttons" class="flex flex-wrap gap-2 text-sm">
+        <span class="text-gray-600">Caricamento camere...</span>
+      </div>
+    </section>
+
+    <!-- Step 3: point pairs -->
+    <section id="workspace" class="space-y-3 hidden">
+      <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">3 · Punti corrispondenti (min 4)</h2>
+      <div class="text-xs bg-amber-950/40 border border-amber-900/50 text-amber-200/90 rounded-xl px-3 py-2">
+        ⚠ Scegli punti <b>a terra</b> (dove le pareti incontrano il pavimento, angoli del pavimento,
+        i piedi dei mobili). La camera guarda la stanza di sbieco: l'omografia mappa il <b>piano del
+        pavimento</b>, quindi punti in alto (soffitto, cima dei mobili) falsano la calibrazione.
+      </div>
+      <p id="hint" class="text-sm text-sky-400"></p>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs text-gray-400">Snapshot camera <span id="cam-label"></span></span>
+            <button onclick="refreshSnapshot()" class="text-xs text-gray-500 hover:text-gray-300">↻ aggiorna</button>
+          </div>
+          <div class="img-wrap bg-gray-900" id="snap-wrap">
+            <img id="snap" alt="snapshot" />
+          </div>
+        </div>
+        <div>
+          <div class="text-xs text-gray-400 mb-1">Planimetria</div>
+          <div class="img-wrap bg-gray-900" id="map-wrap">
+            <img id="mapimg" alt="planimetria" />
+          </div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <span id="pair-count" class="text-sm text-gray-400 tabular-nums">0 coppie</span>
+        <div class="ml-auto flex gap-2">
+          <button onclick="undoPoint()" class="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">Annulla ultimo</button>
+          <button onclick="resetPoints()" class="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">Reset</button>
+          <button onclick="saveCalibration()" id="save-btn" class="px-4 py-1.5 text-sm rounded-lg bg-emerald-600 hover:bg-emerald-500 transition-colors font-semibold disabled:opacity-40 disabled:cursor-not-allowed" disabled>Salva calibrazione</button>
+        </div>
+      </div>
+      <p id="msg" class="text-xs text-gray-500 min-h-[1rem]"></p>
+    </section>
+
+    <!-- Calibrated cameras -->
+    <section class="space-y-2">
+      <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Camere calibrate</h2>
+      <div id="calibrated-list" class="text-sm text-gray-400">—</div>
+    </section>
+
+  </main>
+
+<script>
+// HTML-escape per ogni valore dinamico interpolato in innerHTML (anti-XSS)
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const COLORS = ['#ef4444','#f59e0b','#10b981','#3b82f6','#a855f7','#ec4899','#14b8a6','#eab308','#f97316','#8b5cf6'];
+
+let mapUrl = null;
+let currentCam = null;
+let srcPts = [];   // {natX,natY,pctX,pctY}
+let dstPts = [];
+let awaiting = 'src';  // 'src' → click snapshot next; 'dst' → click map next
+
+// ── Floor plan ────────────────────────────────────────────────────────────────
+function loadMap() {
+  fetch('/api/map').then(r => r.json()).then(d => {
+    const status = document.getElementById('map-status');
+    if (d.exists) {
+      mapUrl = d.url;
+      status.innerHTML = `Planimetria caricata: <span class="text-emerald-400">${esc(d.url.split('/').pop())}</span>`;
+      document.getElementById('mapimg').src = mapUrl;
+    } else {
+      mapUrl = null;
+      status.textContent = 'Nessuna planimetria. Caricane una per iniziare.';
+    }
+  });
+}
+document.getElementById('map-file').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  document.getElementById('map-status').textContent = 'Caricamento...';
+  fetch('/api/map', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert(d.error); loadMap(); })
+    .catch(() => alert('Errore upload planimetria.'));
+});
+
+// ── Cameras ───────────────────────────────────────────────────────────────────
+function loadCameras() {
+  fetch('/api/cameras').then(r => r.json()).then(ids => {
+    const box = document.getElementById('camera-buttons');
+    box.innerHTML = '';
+    if (!ids.length) { box.innerHTML = '<span class="text-gray-600">Nessuna camera attiva.</span>'; return; }
+    ids.forEach(id => {
+      const b = document.createElement('button');
+      b.textContent = `Camera ${id}`;
+      b.className = 'px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors';
+      b.onclick = () => selectCamera(id, b);
+      box.appendChild(b);
+    });
+  });
+}
+
+function selectCamera(id, btn) {
+  currentCam = id;
+  document.querySelectorAll('#camera-buttons button').forEach(b =>
+    b.className = 'px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors');
+  btn.className = 'px-3 py-1.5 rounded-lg bg-emerald-600 transition-colors font-semibold';
+  document.getElementById('cam-label').textContent = id;
+  if (!mapUrl) { alert('Carica prima una planimetria.'); return; }
+  document.getElementById('workspace').classList.remove('hidden');
+  document.getElementById('mapimg').src = mapUrl;
+  refreshSnapshot();
+  resetPoints();
+}
+
+function refreshSnapshot() {
+  if (currentCam == null) return;
+  document.getElementById('snap').src = `/api/cameras/${encodeURIComponent(currentCam)}/snapshot?t=${Date.now()}`;
+}
+
+// ── Point picking ───────────────────────────────────────────────────────────────
+function imgCoords(img, e) {
+  const natX = e.offsetX * (img.naturalWidth / img.clientWidth);
+  const natY = e.offsetY * (img.naturalHeight / img.clientHeight);
+  return { natX, natY, pctX: e.offsetX / img.clientWidth * 100, pctY: e.offsetY / img.clientHeight * 100 };
+}
+
+document.getElementById('snap').addEventListener('click', e => {
+  if (awaiting !== 'src') { flash('Ora clicca il punto corrispondente sulla PLANIMETRIA.'); return; }
+  srcPts.push(imgCoords(e.target, e));
+  awaiting = 'dst';
+  redraw();
+});
+document.getElementById('mapimg').addEventListener('click', e => {
+  if (awaiting !== 'dst') { flash('Prima clicca un punto sullo SNAPSHOT.'); return; }
+  dstPts.push(imgCoords(e.target, e));
+  awaiting = 'src';
+  redraw();
+});
+
+function drawMarkers(wrapId, pts) {
+  const wrap = document.getElementById(wrapId);
+  wrap.querySelectorAll('.pt').forEach(el => el.remove());
+  pts.forEach((p, i) => {
+    const d = document.createElement('div');
+    d.className = 'pt';
+    d.style.left = p.pctX + '%';
+    d.style.top = p.pctY + '%';
+    d.style.background = COLORS[i % COLORS.length];
+    d.textContent = i + 1;
+    wrap.appendChild(d);
+  });
+}
+
+function redraw() {
+  drawMarkers('snap-wrap', srcPts);
+  drawMarkers('map-wrap', dstPts);
+  const pairs = Math.min(srcPts.length, dstPts.length);
+  document.getElementById('pair-count').textContent = `${pairs} coppie`;
+  document.getElementById('save-btn').disabled = pairs < 4;
+  document.getElementById('hint').textContent = awaiting === 'src'
+    ? 'Clicca un punto A TERRA sullo SNAPSHOT (es. angolo pavimento/parete, piede di un mobile).'
+    : 'Ora clicca lo STESSO punto a terra sulla PLANIMETRIA.';
+}
+
+function undoPoint() {
+  if (awaiting === 'dst' && srcPts.length) srcPts.pop();        // last action was a src click
+  else if (dstPts.length) { dstPts.pop(); awaiting = 'dst'; }   // undo last completed pair's dst
+  else if (srcPts.length) srcPts.pop();
+  if (srcPts.length === dstPts.length) awaiting = 'src';
+  redraw();
+}
+function resetPoints() { srcPts = []; dstPts = []; awaiting = 'src'; document.getElementById('msg').textContent = ''; redraw(); }
+
+function flash(t) { const m = document.getElementById('msg'); m.textContent = '⚠ ' + t; }
+
+function saveCalibration() {
+  const pairs = Math.min(srcPts.length, dstPts.length);
+  if (pairs < 4) { flash('Servono almeno 4 coppie.'); return; }
+  const points = [];
+  for (let i = 0; i < pairs; i++) {
+    points.push({ px: srcPts[i].natX, py: srcPts[i].natY, mx: dstPts[i].natX, my: dstPts[i].natY });
+  }
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true; btn.textContent = 'Salvataggio...';
+  fetch(`/api/calibration/${encodeURIComponent(currentCam)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ points }),
+  }).then(r => r.json()).then(d => {
+    btn.textContent = 'Salva calibrazione';
+    if (d.error) { flash(d.error); btn.disabled = false; return; }
+    document.getElementById('msg').textContent = '✓ ' + d.message;
+    loadCalibrated();
+  }).catch(() => { flash('Errore di rete.'); btn.disabled = false; });
+}
+
+// ── Calibrated cameras list ─────────────────────────────────────────────────────
+function loadCalibrated() {
+  fetch('/api/calibration').then(r => r.json()).then(list => {
+    const el = document.getElementById('calibrated-list');
+    if (!list.length) { el.textContent = 'Nessuna camera ancora calibrata.'; return; }
+    el.innerHTML = list.map(c =>
+      `<div class="flex items-center gap-2 py-1">
+         <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+         <span>Camera <b>${esc(c.camera)}</b> — ${c.points.length} punti</span>
+         <span class="text-gray-600 text-xs">${esc(new Date(c.updated_at).toLocaleString('it-IT'))}</span>
+       </div>`).join('');
+  });
+}
+
+loadMap();
+loadCameras();
+loadCalibrated();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -78,3 +78,18 @@ class PositionLog(Base):
     world_y = Column(Float, nullable=True)
 
     person = relationship("Person", back_populates="positions")
+
+
+class CameraCalibration(Base):
+    """Per-camera homography mapping frame pixels to a shared floor-plan plane.
+
+    `points_json` stores the pixel<->map correspondences (so calibration can be
+    re-edited), `homography_json` the computed 3x3 matrix used at runtime.
+    """
+    __tablename__ = "camera_calibrations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(String(64), nullable=False, unique=True, index=True)
+    points_json = Column(Text, nullable=False)
+    homography_json = Column(Text, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)

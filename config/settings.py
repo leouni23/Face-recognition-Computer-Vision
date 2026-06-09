@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     camera_sources: str = "0"
     match_threshold: float = 0.5
     use_gpu: bool = True
+    web_password: str = ""  # Basic Auth per la Web UI; vuota = nessuna autenticazione (solo localhost!)
     data_retention_days: int = 365
     position_log_interval: float = 1.0  # seconds between saved position points per person/camera
     log_level: str = "INFO"
