@@ -34,3 +34,6 @@ build/
 # Database local files
 *.db
 *.sqlite3
+
+# Planimetrie caricate dall'utente (possono rappresentare ambienti reali — mai pubblicarle)
+web/static/maps/
