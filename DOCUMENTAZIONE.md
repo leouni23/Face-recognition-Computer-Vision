@@ -1,33 +1,39 @@
-# Face Recognition System — Documentazione Tecnica Completa
+# Face ID — Documentazione Tecnica Completa
 
 ## Indice
+
 1. [Panoramica del Progetto](#1-panoramica-del-progetto)
 2. [Architettura del Sistema](#2-architettura-del-sistema)
 3. [Componenti Principali](#3-componenti-principali)
-4. [Flusso Dati End-to-End](#4-flusso-dati-end-to-end)
-5. [Stack Tecnologico](#5-stack-tecnologico)
-6. [Conformità GDPR](#6-conformità-gdpr)
-7. [Configurazione e Deploy](#7-configurazione-e-deploy)
-8. [Argomenti da Studiare per la Presentazione](#8-argomenti-da-studiare-per-la-presentazione)
+4. [Tracking Posizioni e Mappa](#4-tracking-posizioni-e-mappa)
+5. [Flusso Dati End-to-End](#5-flusso-dati-end-to-end)
+6. [Sicurezza della Web UI](#6-sicurezza-della-web-ui)
+7. [Stack Tecnologico](#7-stack-tecnologico)
+8. [Conformità GDPR](#8-conformità-gdpr)
+9. [Configurazione e Deploy](#9-configurazione-e-deploy)
+10. [Argomenti da Studiare per la Presentazione](#10-argomenti-da-studiare-per-la-presentazione)
 
 ---
 
 ## 1. Panoramica del Progetto
 
-Sistema di riconoscimento facciale in tempo reale con interfaccia web. Acquisisce il video dalla webcam, rileva i volti, li confronta con un database di persone iscritte e mostra i risultati live nel browser.
+Sistema di riconoscimento facciale in tempo reale con interfaccia web. Acquisisce il video da una o più camere, rileva i volti, li confronta con un database di persone iscritte, mostra i risultati live nel browser e **traccia la posizione dei soggetti identificati nel tempo**, proiettandola su una planimetria della stanza.
 
 **Funzionalità principali:**
+
 - Rilevamento e riconoscimento volti in tempo reale (~25 FPS)
-- Accelerazione GPU tramite CUDA (NVIDIA)
+- Accelerazione GPU tramite CUDA (NVIDIA), fallback automatico su CPU
 - Web UI per monitoraggio, iscrizione e gestione persone
-- Embedding biometrici cifrati a riposo (AES-128 + HMAC)
+- Tracking della posizione nel tempo (storico + mappa live) con due modalità di calibrazione camera
+- Embedding biometrici cifrati a riposo (AES-128-CBC + HMAC-SHA256)
+- Autenticazione opzionale della Web UI, guard CSRF e security headers
 - Conformità GDPR: consenso, data retention, diritto all'oblio
 
 ---
 
 ## 2. Architettura del Sistema
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                         main.py                                  │
 │  Orchestrator: avvia camera threads, pipeline, Flask server      │
@@ -40,46 +46,52 @@ Sistema di riconoscimento facciale in tempo reale con interfaccia web. Acquisisc
   │  (thread)    │  │  (thread)    │  │  (daemon thread) │
   └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘
          │                 │                    │
-         │  frame BGR      │  results           │  MJPEG / SSE / REST
-         └────────────────►│                    │
+         │  frame BGR      │  results +         │  MJPEG / SSE / REST
+         └────────────────►│  posizioni mappa   │  mappa / calibrazione
                            │◄───────────────────┤ broadcaster
                            │                    │  (thread-safe bridge)
                     ┌──────▼──────┐             │
                     │  Database   │             │
-                    │  SQLite     │             │
-                    │  SQLAlchemy │             │
-                    └─────────────┘             │
-                                                ▼
+                    │  SQLite /   │             │
+                    │  PostgreSQL │             │
+                    └─────────────┘             ▼
                                         ┌──────────────┐
                                         │   Browser    │
-                                        │  index.html  │
+                                        │ dashboard ·  │
+                                        │ mappa live · │
+                                        │ calibrazione │
                                         └──────────────┘
 ```
 
 ### Struttura cartelle
 
-```
+```text
 Face-recognition-Computer-Vision/
 ├── config/
 │   └── settings.py          # Configurazione centralizzata (Pydantic)
 ├── core/
-│   ├── camera.py            # Acquisizione video threaded
-│   ├── detector.py          # Rilevamento volti + embedding ArcFace
-│   ├── recognizer.py        # Matching embedding (cosine distance)
-│   └── pipeline.py          # Pipeline completa (detect → recognize → log)
+│   ├── camera.py            # Acquisizione video threaded (webcam + RTSP)
+│   ├── detector.py          # Rilevamento volti (SCRFD) + embedding ArcFace
+│   ├── recognizer.py        # Matching embedding (cosine distance, matrice precalcolata)
+│   ├── geometry.py          # Omografia + calibrazione polare (distanza dal viso)
+│   └── pipeline.py          # Pipeline: detect → recognize → log → proiezione mappa
 ├── database/
-│   ├── models.py            # Tabelle ORM: Person, FaceTemplate, RecognitionEvent
+│   ├── models.py            # Person, FaceTemplate, RecognitionEvent,
+│   │                        #   PositionLog, CameraCalibration
 │   ├── session.py           # Engine SQLAlchemy + context manager
-│   └── repository.py        # CRUD e query specializzate
+│   └── repository.py        # CRUD, traiettorie, calibrazioni
 ├── privacy/
-│   ├── crypto.py            # Cifratura Fernet (AES-128-CBC + HMAC-SHA256)
+│   ├── crypto.py            # Cifratura Fernet + guard chiave placeholder
 │   └── retention.py         # Pulizia automatica dati scaduti (GDPR Art. 5)
 ├── ui/
 │   └── display.py           # Annotazione frame OpenCV + FPS counter
 ├── web/
-│   ├── app.py               # Flask endpoints (stream, SSE, enrollment, REST)
-│   ├── broadcaster.py       # Bridge thread-safe tra worker e Flask
-│   └── static/index.html    # Single-page app (Tailwind CSS + Vanilla JS)
+│   ├── app.py               # Flask: stream, SSE, enrollment, mappa, calibrazione
+│   ├── broadcaster.py       # Bridge thread-safe con conteggio viewer
+│   └── static/
+│       ├── index.html       # Dashboard (Tailwind CSS + Vanilla JS)
+│       ├── calibrate.html   # Pagina calibrazione con live feed
+│       └── maps/            # Planimetria caricata
 ├── scripts/
 │   ├── init_db.py           # Creazione tabelle (idempotente)
 │   ├── enroll.py            # Iscrizione persona da CLI
@@ -96,32 +108,36 @@ Face-recognition-Computer-Vision/
 `CameraStream` apre una webcam locale (indice intero) o telecamera IP (URL RTSP) in un thread separato per non bloccare la pipeline.
 
 **Meccanismo:**
+
 - Thread daemon legge frame in loop continuo
 - Coda interna `maxsize=2`: scarta i frame più vecchi se la pipeline è lenta (evita accumulo)
-- Per RTSP: riconnessione automatica con backoff esponenziale (fino a 30 tentativi)
+- Per RTSP: riconnessione automatica fino a 30 tentativi, con ritardo fisso di 2 s tra un tentativo e l'altro
 
-**Perché un thread separato?**  
+**Perché un thread separato?**
 `cv2.VideoCapture.read()` è bloccante: senza thread, ogni chiamata aspetterebbe il frame successivo dalla camera, introducendo latenza variabile e bloccando tutto il resto del programma.
 
 ---
 
 ### 3.2 Rilevamento e Embedding — `core/detector.py`
 
-Usa **InsightFace** con modello **buffalo_l** (RetinaFace + ArcFace).
+Usa **InsightFace** con il pacchetto di modelli **buffalo_l** (detection **SCRFD** + recognition **ArcFace**).
 
 **Due fasi:**
 
-1. **Face Detection** (RetinaFace): localizza i volti nel frame → bbox `(x1, y1, x2, y2)` + 5 landmark facciali
-2. **Face Recognition** (ArcFace): estrae l'**embedding**: un vettore di 512 numeri float32 che rappresenta univocamente le caratteristiche del volto
+1. **Face Detection** (SCRFD — *Sample and Computation Redistribution for Face Detection*): localizza i volti nel frame → bbox `(x1, y1, x2, y2)` + 5 landmark facciali
+2. **Face Recognition** (ArcFace): estrae l'**embedding**, un vettore di 512 numeri float32 che rappresenta univocamente le caratteristiche del volto
 
 **Embedding ArcFace:**
+
 - Output di una ResNet-100 addestrata con *ArcFace loss* (additive angular margin)
 - Già normalizzato L2: `||e|| = 1` → vettore sulla sfera unitaria in 512 dimensioni
 - Due volti della stessa persona → embedding vicini; persone diverse → embedding lontani
 
 **GPU vs CPU:**
+
 - Con `USE_GPU=true`: usa `CUDAExecutionProvider` (ONNX Runtime → NVIDIA CUDA)
-- Su Windows: le DLL CUDA vengono caricate dai pacchetti `nvidia-*-cu12` installati via pip
+- Su Windows: le DLL CUDA vengono caricate dai pacchetti `nvidia-*-cu12` installati via pip (il PATH viene aggiornato all'avvio)
+- L'inizializzazione del modello è protetta da un lock (più camera-thread potrebbero richiederla in parallelo)
 - Speedup tipico: 5-10× rispetto a CPU
 
 ---
@@ -133,27 +149,27 @@ Usa **InsightFace** con modello **buffalo_l** (RetinaFace + ArcFace).
 **Algoritmo:**
 
 ```python
-# Template: matrice N×512 (N = persone iscritte)
+# Template: matrice N×512 PRECALCOLATA in load() (non ricostruita a ogni frame)
 # Query:    vettore 1×512 (volto da identificare)
 
 cosine_distances = 1 - (template_matrix @ query_embedding)
 # dato che tutti i vettori sono normalizzati L2:
-# dot product = cosine similarity
-# distance = 1 - similarity
+# dot product = cosine similarity → distance = 1 - similarity
 
 best_idx = argmin(cosine_distances)
 best_distance = cosine_distances[best_idx]
+confidence = clamp(1 - best_distance, 0.0, 1.0)   # clamp contro errori float32
 
 if best_distance < MATCH_THRESHOLD:   # default: 0.5
-    return (person_id, name, confidence=1 - best_distance)
+    return (person_id, name, confidence)
 else:
     return (None, "Sconosciuto", confidence)
 ```
 
-**Perché cosine distance?**  
+**Perché cosine distance?**
 Gli embedding ArcFace sono ottimizzati per la similarità coseno. Due embedding della stessa persona hanno cosine similarity tipicamente > 0.6 (distanza < 0.4). `MATCH_THRESHOLD=0.5` è il valore consigliato da InsightFace.
 
-**Performance:** l'operazione è una moltiplicazione matrice-vettore vectorizzata da NumPy → O(N×512), molto veloce anche con centinaia di persone.
+**Performance:** la matrice dei template viene costruita una sola volta al caricamento e scambiata atomicamente (i thread non vedono mai stati misti); il confronto per frame è una singola moltiplicazione matrice-vettore NumPy → O(N×512), veloce anche con centinaia di persone.
 
 ---
 
@@ -161,28 +177,33 @@ Gli embedding ArcFace sono ottimizzati per la similarità coseno. Due embedding 
 
 `FaceIdPipeline` orchestra l'intero flusso per ogni frame:
 
-1. **Reload template** (ogni 60s): rilegge gli embedding dal database e li carica nel recognizer. Permette di iscrivere nuove persone a caldo senza riavviare.
+1. **Reload periodico** (ogni 60 s): rilegge dal database gli embedding e le calibrazioni camera. Permette di iscrivere persone e calibrare camere a caldo, senza riavvii
 2. **Detect & Encode**: chiama `detect_and_encode(frame)`
 3. **Identify**: per ogni volto rilevato, chiama `recognizer.identify(embedding)`
-4. **Log event**: se la persona è stata riconosciuta e non è stata loggata negli ultimi 10s, registra l'evento nel database e aggiorna `last_seen`
+4. **Log eventi**: se la persona è riconosciuta e non è stata loggata negli ultimi 10 s, registra l'evento e aggiorna `last_seen`
+5. **Log posizioni**: per ogni soggetto identificato, salva la posizione (bounding box) a cadenza `POSITION_LOG_INTERVAL` e — se la camera è calibrata — la proietta sulla planimetria con smoothing EMA (vedi §4)
 
-**Throttling dei log** (`_LOG_COOLDOWN=10s`): evita di scrivere migliaia di righe al secondo nel database quando una persona è ferma davanti alla camera.
+**Throttling dei log** (`_LOG_COOLDOWN=10s` per gli eventi, `POSITION_LOG_INTERVAL=1s` per le posizioni): evita di scrivere migliaia di righe al secondo nel database quando una persona è ferma davanti alla camera.
 
 ---
 
 ### 3.5 Database — `database/`
 
-**Tre tabelle:**
+**Cinque tabelle:**
 
 | Tabella | Scopo |
-|---|---|
+| --- | --- |
 | `Person` | Dati anagrafici: nome, consenso, date |
-| `FaceTemplate` | Embedding cifrati (AES-128) |
+| `FaceTemplate` | Embedding cifrati (Fernet) |
 | `RecognitionEvent` | Log: chi, quando, con quale confidenza, su quale camera |
+| `PositionLog` | Posizione nel tempo: centro/dimensione bbox in pixel + coordinate mappa (`world_x/world_y`) |
+| `CameraCalibration` | Calibrazione per camera: punti di riferimento + parametri del proiettore (omografia o polare) |
 
 **ORM:** SQLAlchemy v2 con pattern Repository — tutta la logica di accesso ai dati è in `repository.py`, mai SQL grezzo nei moduli di business logic.
 
-**SQLite vs PostgreSQL:** Il progetto supporta entrambi tramite `DATABASE_URL`. SQLite non richiede installazioni aggiuntive ed è sufficiente per uso personale/locale. Per deployment multi-utente si switcherebbe a PostgreSQL cambiando solo la variabile d'ambiente.
+**SQLite vs PostgreSQL:** il progetto supporta entrambi tramite `DATABASE_URL`. SQLite non richiede installazioni aggiuntive ed è sufficiente per uso personale/locale; per deployment multi-utente si passa a PostgreSQL cambiando solo la variabile d'ambiente.
+
+**Cancellazione a cascata:** eliminando una `Person` vengono eliminati automaticamente template e traiettorie (`ON DELETE CASCADE`) — requisito per il diritto all'oblio.
 
 ---
 
@@ -191,52 +212,107 @@ Gli embedding ArcFace sono ottimizzati per la similarità coseno. Due embedding 
 Gli embedding biometrici non vengono mai salvati in chiaro nel database.
 
 **Schema di cifratura:**
-```
-secret_key (stringa) 
-    → SHA-256 → 32 bytes 
-    → Base64url encode 
+
+```text
+secret_key (stringa)
+    → SHA-256 → 32 bytes
+    → Base64url encode
     → chiave Fernet valida
 
 Fernet = AES-128-CBC + HMAC-SHA256 + timestamp
 ```
 
 **Fernet** (dalla libreria `cryptography`) garantisce:
+
 - **Confidenzialità**: AES-128-CBC cifra il payload
 - **Integrità**: HMAC-SHA256 previene manomissioni
 - **Autenticità**: solo chi conosce la chiave può decifrare
 
-Se `BIOMETRIC_SECRET_KEY` viene ruotata, tutti i template esistenti diventano automaticamente inutilizzabili (le persone devono essere re-iscritte).
+Se `BIOMETRIC_SECRET_KEY` viene ruotata, tutti i template esistenti diventano automaticamente inutilizzabili (le persone devono essere re-iscritte). Se la chiave è **vuota o è ancora il placeholder**, il sistema solleva un errore esplicito e si rifiuta di cifrare: impossibile avviare il trattamento con una chiave non configurata.
 
 ---
 
 ### 3.7 Web UI — `web/`
 
-**Flask** espone tre categorie di endpoint:
+**Flask** espone quattro categorie di endpoint:
 
-**MJPEG Streaming** (`/stream/<camera_id>`):  
-Protocollo multipart/x-mixed-replace — il server invia frame JPEG in sequenza nella stessa connessione HTTP. Il browser li interpreta come video live senza plugin.
+**MJPEG Streaming** (`/stream/<camera_id>`):
+Protocollo multipart/x-mixed-replace — il server invia frame JPEG in sequenza nella stessa connessione HTTP. Il browser li interpreta come video live senza plugin. L'encoding JPEG avviene **solo se c'è almeno un viewer collegato** (conteggio nel broadcaster) e vengono inviati solo i frame nuovi.
 
-**Server-Sent Events** (`/api/events`):  
+**Server-Sent Events** (`/api/events`):
 Connessione HTTP long-lived: il server invia eventi JSON ogni volta che viene riconosciuta una persona. Il browser aggiorna la lista riconoscimenti in tempo reale senza polling.
 
-**Enrollment API** (4 endpoint POST):  
-Processo stateful in 3 step:
-1. `/api/enroll/start` — inizializza sessione con nome e numero campioni richiesti
-2. `/api/enroll/capture` — cattura e analizza un frame dal broadcaster (senza aprire una seconda connessione alla camera)
-3. `/api/enroll/save` — calcola la media degli embedding raccolti e salva nel database
+**Enrollment API** (processo stateful in 3 step):
 
-**Broadcaster** (`web/broadcaster.py`):  
-Bridge thread-safe tra i worker thread (che elaborano i frame) e Flask (che li serve al browser). Usa `threading.Lock` per proteggere l'accesso ai frame condivisi e `queue.Queue` per distribuire gli eventi SSE a tutti i subscriber connessi.
+1. `/api/enroll/start` — inizializza la sessione con nome (validato) e numero campioni
+2. `/api/enroll/capture` — cattura e analizza un frame dal broadcaster (senza aprire una seconda connessione alla camera)
+3. `/api/enroll/save` — media degli embedding, **rinormalizzazione L2** e salvataggio cifrato
+
+**Mappa e calibrazione:**
+
+- `/api/map` (GET/POST) — lettura/upload della planimetria (validata come immagine, max 10 MB)
+- `/api/calibration/<camera>` (POST) — salva la calibrazione (polare od omografia)
+- `/api/calibration/<camera>/sample` (POST) — cattura un campione per la calibrazione polare
+- `/api/positions/map` — ultima posizione sulla mappa per ogni persona
+- `/api/persons/<id>/trajectory` — storico posizioni di un soggetto
+- `/calibrate` — pagina di calibrazione guidata con **video live** della camera
+
+**Broadcaster** (`web/broadcaster.py`):
+Bridge thread-safe tra i worker thread (che elaborano i frame) e Flask (che li serve al browser). Usa `threading.Lock` per i frame condivisi, `queue.Queue` per gli eventi SSE e tiene il conteggio dei viewer MJPEG per evitare encoding inutile.
 
 ---
 
-## 4. Flusso Dati End-to-End
+## 4. Tracking Posizioni e Mappa
 
-### 4.1 Riconoscimento in tempo reale
+### 4.1 Cosa viene salvato
 
+Per ogni soggetto **identificato** (mai per gli sconosciuti), a cadenza configurabile (default 1 punto/s per persona per camera), la pipeline salva in `PositionLog`:
+
+- centro e dimensione del bounding box del volto (pixel) + dimensioni del frame
+- coordinate sulla planimetria (`world_x/world_y`) se la camera è calibrata
+- camera, timestamp e confidenza
+
+Il **re-identification tra camere è implicito**: la stessa persona ha lo stesso `person_id` su ogni camera grazie all'embedding ArcFace — non serve alcun algoritmo aggiuntivo di "ricucitura".
+
+### 4.2 Calibrazione: due modalità
+
+La proiezione da pixel del frame a coordinate della planimetria dipende da cosa inquadra la camera.
+
+#### Modalità polare — *la camera NON vede il pavimento* (es. webcam su scrivania)
+
+Senza pavimento inquadrato l'omografia non è applicabile. Si usa il metodo documentato in letteratura per la **stima monoculare della distanza dalla dimensione apparente del volto**: il viso umano adulto ha dimensioni fisiche quasi costanti, quindi per il modello pinhole:
+
+```text
+distanza   d = k / h_px                  (h_px = altezza del volto in pixel)
+angolo     β = heading + s·(x_norm − ½)  (x_norm = posizione orizzontale nel frame)
+posizione  P = C + d·(cos β, sin β)      (C = posizione della camera sulla mappa)
 ```
-[Webcam] 
-    │ frame BGR 1920×1080
+
+Le costanti (`heading` = orientamento camera, `s` ≈ FOV orizzontale, `k` = costante di distanza) vengono risolte **ai minimi quadrati** da ≥2 campioni di riferimento: l'utente si mette in un punto noto della stanza, clicca quel punto sulla mappa e preme "Cattura campione". I campioni devono trovarsi in zone orizzontali diverse dell'inquadratura (controllo di degenerazione).
+
+#### Modalità omografia — *la camera vede il pavimento* (es. telecamera a soffitto)
+
+Una matrice 3×3 stimata con `cv2.findHomography` da ≥4 coppie di punti **a terra** (pixel ↔ planimetria) mappa il piano del pavimento sulla mappa. Viene proiettato il centro-basso del bounding box.
+
+### 4.3 Smoothing e precisione
+
+- La dimensione del volto in pixel è rumorosa frame a frame → le posizioni sulla mappa sono filtrate con una **media mobile esponenziale** (α = 0.4, reset dopo 5 s senza avvistamenti)
+- La precisione è **a livello di zona** ("vicino al letto / alla porta"), non centimetrica: il volto sta ~1.5 m sopra il piano modellato (omografia) e la dimensione del viso varia tra persone di ±10% (polare)
+
+### 4.4 Visualizzazione
+
+- **Vista Mappa** (dashboard): pallini live dei soggetti sulla planimetria, aggiornati ogni 2 s
+- **Storico** (per persona): traiettoria su canvas per ogni camera, gradiente blu→verde dal punto più vecchio al più recente, intervallo da 15 minuti a 24 ore
+
+---
+
+## 5. Flusso Dati End-to-End
+
+### 5.1 Riconoscimento in tempo reale
+
+```text
+[Webcam]
+    │ frame BGR
     ▼
 [CameraStream thread]
     │ frame BGR
@@ -244,36 +320,32 @@ Bridge thread-safe tra i worker thread (che elaborano i frame) e Flask (che li s
 [FaceIdPipeline.process_frame()]
     │
     ├─[detect_and_encode(frame)]
-    │     InsightFace: RetinaFace detection → ArcFace embedding
+    │     InsightFace: SCRFD detection → ArcFace embedding
     │     Output: [(top,right,bottom,left), embedding_512d]
     │
     ├─[recognizer.identify(embedding)]
     │     cosine_distance = 1 - (templates @ embedding)
     │     Output: (person_id, name, confidence)
     │
-    ├─[repository.log_event()] → SQLite
+    ├─[repository.log_event()]          → DB (throttle 10 s)
+    ├─[repository.log_position()]       → DB (1/s, con proiezione mappa + EMA)
     │
     └─ Output: [(location, person_id, name, confidence), ...]
          │
          ├─► broadcaster.push_frame(camera_id, annotated_frame)
-         │       → JPEG encode → stored in memory
+         │       → JPEG encode SOLO se c'è un viewer collegato
          │
          └─► broadcaster.push_event(camera_id, name, confidence)
-                 → messo in queue dei subscriber SSE
+                 → queue dei subscriber SSE
 
-[Browser — MJPEG]
-    GET /stream/0
-    └─► broadcaster.get_frame() → JPEG bytes → img src
-    
-[Browser — SSE]
-    GET /api/events
-    └─► broadcaster.subscribe() → queue
-        ogni evento: data: {"camera":"0","name":"Leo","confidence":0.91}
+[Browser — MJPEG]   GET /stream/0      → frame JPEG live
+[Browser — SSE]     GET /api/events    → {"camera":"0","name":"Leo","confidence":0.91}
+[Browser — Mappa]   GET /api/positions/map → [{"name":"Leo","world_x":...,"world_y":...}]
 ```
 
-### 4.2 Iscrizione nuova persona (Web UI)
+### 5.2 Iscrizione nuova persona (Web UI)
 
-```
+```text
 [Browser] POST /api/enroll/start {"name": "Leo", "samples": 5}
     └─► _enroll_session = {name: "Leo", embeddings: [], required: 5}
 
@@ -281,28 +353,54 @@ Bridge thread-safe tra i worker thread (che elaborano i frame) e Flask (che li s
     └─► broadcaster.get_raw_frame("0") → frame ndarray
         detect_and_encode(frame) → embedding
         _enroll_session["embeddings"].append(embedding)
-        
+
 [Browser] POST /api/enroll/save
-    └─► mean_embedding = np.mean(embeddings, axis=0)
-        normalize L2
-        repository.create("Leo") → Person
-        repository.give_consent(person)
-        repository.add_template(person, mean_embedding)
-            → encrypt_embedding() → FaceTemplate → SQLite
-        pipeline.force_reload() → template ricaricati subito
+    └─► mean = np.mean(embeddings, axis=0)
+        mean /= np.linalg.norm(mean)        ← rinormalizzazione L2 (essenziale!)
+        repository.add_template(person, mean)
+            → encrypt_embedding() → FaceTemplate → DB
+        pipeline.force_reload() → riconoscimento attivo subito
+```
+
+### 5.3 Calibrazione polare di una camera
+
+```text
+[Browser /calibrate]
+    1. clic sulla planimetria → posizione della camera (C)
+    2. l'utente si mette in un punto noto della stanza
+       clic di quel punto sulla mappa
+       POST /api/calibration/0/sample → {x_norm, h_px} del volto live
+    3. ripetuto per ≥2 punti in zone diverse dell'inquadratura
+    4. POST /api/calibration/0 {mode:"polar", camera:C, samples:[...]}
+       └─► solve_polar_calibration() → {heading, scale, k}  (minimi quadrati)
+           pipeline.force_reload() → proiezione attiva subito
 ```
 
 ---
 
-## 5. Stack Tecnologico
+## 6. Sicurezza della Web UI
+
+| Misura | Implementazione |
+| --- | --- |
+| **Basic Auth opzionale** | `WEB_PASSWORD` nel `.env`; confronto in tempo costante con `hmac.compare_digest` (previene timing attack) |
+| **Default sicuro** | Il server ascolta solo su `127.0.0.1`; se esposto (`--host 0.0.0.0`) senza password viene loggato un warning esplicito |
+| **Guard CSRF** | Le richieste mutanti (POST/PUT/PATCH/DELETE) con header `Sec-Fetch-Site: cross-site` vengono rifiutate (403) — l'header è impostato dal browser e non falsificabile da una pagina malevola |
+| **Security headers** | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` |
+| **Validazione input** | Nome persona: regex `[\w\s'.\-]`, max 100 caratteri; upload planimetria: max 10 MB, verificato come immagine decodificabile prima del salvataggio |
+| **Chiave biometrica** | Errore esplicito all'avvio se `BIOMETRIC_SECRET_KEY` è vuota o è il placeholder |
+
+---
+
+## 7. Stack Tecnologico
 
 | Componente | Tecnologia | Versione |
-|---|---|---|
-| Face Detection | RetinaFace (InsightFace) | buffalo_l |
+| --- | --- | --- |
+| Face Detection | SCRFD (InsightFace) | buffalo_l |
 | Face Recognition | ArcFace ResNet-100 | buffalo_l |
 | Inference Runtime | ONNX Runtime | ≥1.18.0 |
-| GPU Acceleration | CUDA | 12.6 |
+| GPU Acceleration | CUDA | 12.x |
 | Acquisizione Video | OpenCV | ≥4.8.0 |
+| Geometria (omografia) | OpenCV `findHomography` | — |
 | Web Framework | Flask | ≥3.0.0 |
 | ORM | SQLAlchemy | ≥2.0.0 |
 | Database | SQLite (locale) / PostgreSQL | — |
@@ -313,39 +411,43 @@ Bridge thread-safe tra i worker thread (che elaborano i frame) e Flask (che li s
 
 ---
 
-## 6. Conformità GDPR
+## 8. Conformità GDPR
 
 I dati biometrici (embedding facciali) rientrano nella **categoria speciale** ai sensi dell'Art. 9 GDPR.
 
 | Articolo GDPR | Requisito | Implementazione nel progetto |
-|---|---|---|
-| Art. 5 — Minimizzazione | Solo dati strettamente necessari | Nessuna immagine salvata, solo vettori numerici |
+| --- | --- | --- |
+| Art. 5 — Minimizzazione | Solo dati strettamente necessari | Nessuna immagine salvata, solo vettori numerici cifrati |
 | Art. 5 — Limitazione conservazione | Scadenza dati | `DATA_RETENTION_DAYS` + `run_retention()` automatico all'avvio |
 | Art. 9 — Consenso esplicito | Per dati biometrici | `consent_given=True` prima di salvare qualsiasi template |
-| Art. 17 — Diritto all'oblio | Cancellazione su richiesta | `DELETE /api/persons/{name}` + `delete_person.py` |
-| Art. 25 — Privacy by design | Protezione by default | Embedding cifrati a riposo, nessun log immagini |
-| Art. 32 — Sicurezza del trattamento | Misure tecniche | AES-128-CBC + HMAC-SHA256 (Fernet), key derivation SHA-256 |
+| Art. 17 — Diritto all'oblio | Cancellazione su richiesta | `DELETE /api/persons/{name}` + `delete_person.py` — elimina anche traiettorie (`CASCADE`) |
+| Art. 25 — Privacy by design | Protezione by default | Embedding cifrati a riposo, server solo su localhost di default |
+| Art. 32 — Sicurezza del trattamento | Misure tecniche | Fernet (AES-128-CBC + HMAC-SHA256), key derivation SHA-256, Basic Auth |
+
+> **Nota sul tracking:** la registrazione della posizione nel tempo amplia il perimetro del trattamento rispetto al solo riconoscimento. Il consenso raccolto in fase di iscrizione deve coprire anche questa finalità; per deployment reali valutare una DPIA (Art. 35).
 
 ---
 
-## 7. Configurazione e Deploy
+## 9. Configurazione e Deploy
 
 ### Variabili d'ambiente (`.env`)
 
 | Variabile | Default | Descrizione |
-|---|---|---|
-| `DATABASE_URL` | `sqlite:///./face_id.db` | Stringa connessione database |
-| `BIOMETRIC_SECRET_KEY` | — | **Obbligatoria.** Chiave 32+ byte per cifratura embedding |
+| --- | --- | --- |
+| `DATABASE_URL` | PostgreSQL locale | Stringa connessione — per SQLite: `sqlite:///./face_id.db` |
+| `BIOMETRIC_SECRET_KEY` | — | **Obbligatoria.** Chiave per la cifratura degli embedding |
+| `WEB_PASSWORD` | *(vuota)* | Basic Auth Web UI — obbligatoria se esposta oltre localhost |
 | `CAMERA_SOURCES` | `0` | Indici/URL camere separati da virgola (es. `0,1` o `rtsp://...`) |
-| `MATCH_THRESHOLD` | `0.5` | Soglia cosine distance (0=identici, 1=completamente diversi) |
+| `MATCH_THRESHOLD` | `0.5` | Soglia cosine distance (più basso = più severo) |
 | `USE_GPU` | `true` | Usa CUDA se disponibile |
+| `POSITION_LOG_INTERVAL` | `1.0` | Secondi tra i punti di posizione salvati (per persona/camera) |
 | `DATA_RETENTION_DAYS` | `365` | Giorni di conservazione dati biometrici |
 | `LOG_LEVEL` | `INFO` | Verbosità log (DEBUG/INFO/WARNING/ERROR) |
 
 ### Avvio
 
 ```bash
-# Solo web UI (consigliato)
+# Solo web UI (consigliato) — http://localhost:8000
 python main.py --web
 
 # Solo finestre OpenCV locali
@@ -353,6 +455,9 @@ python main.py
 
 # Entrambe
 python main.py --web --local
+
+# Esposizione sulla LAN (richiede WEB_PASSWORD nel .env)
+python main.py --web --host 0.0.0.0
 
 # Iscrizione nuova persona da CLI
 python scripts/enroll.py --name "Nome Cognome" --samples 5
@@ -363,79 +468,103 @@ python scripts/delete_person.py --name "Nome Cognome"
 
 ---
 
-## 8. Argomenti da Studiare per la Presentazione
+## 10. Argomenti da Studiare per la Presentazione
 
 ### LIVELLO 1 — Fondamentali (obbligatori)
 
 #### 1.1 Computer Vision di base
+
 - **Cos'è un'immagine digitale**: matrice di pixel, canali BGR/RGB, risoluzione
 - **OpenCV**: libreria per elaborazione immagini, `cv2.VideoCapture`, `cv2.imencode`
 - **Frame rate (FPS)**: fotogrammi al secondo, perché è importante in real-time
 
-**Domanda tipica:** *"Come funziona la cattura video?"*  
+**Domanda tipica:** *"Come funziona la cattura video?"*
 → `CameraStream` apre la webcam con OpenCV in un thread separato e legge frame in loop. Il thread è separato perché `read()` è bloccante.
 
 ---
 
 #### 1.2 Face Detection
+
 - **Cosa fa**: trova i rettangoli delimitatori (bounding box) dei volti in un'immagine
-- **RetinaFace**: detector convoluzionale che usa Feature Pyramid Network (FPN) per rilevare volti a scale diverse
+- **SCRFD**: detector convoluzionale efficiente (*Sample and Computation Redistribution for Face Detection*) usato dal pacchetto buffalo_l di InsightFace — rileva volti a scale diverse
 - **Landmark facciali**: 5 punti chiave (occhi, naso, angoli bocca) usati per allineare il volto prima del riconoscimento
 
-**Domanda tipica:** *"Come individua i volti nell'immagine?"*  
-→ InsightFace usa RetinaFace, una rete neurale convoluzionale addestrata su milioni di volti. Output: bbox + 5 landmark per ogni volto trovato.
+**Domanda tipica:** *"Come individua i volti nell'immagine?"*
+→ InsightFace usa SCRFD, una rete neurale convoluzionale addestrata su milioni di volti. Output: bbox + 5 landmark per ogni volto trovato.
 
 ---
 
 #### 1.3 Face Recognition con ArcFace
+
 - **Embedding (o feature vector)**: vettore numerico che rappresenta le caratteristiche di un volto — nel progetto 512 dimensioni float32
 - **ArcFace**: architettura ResNet-100 addestrata con *additive angular margin loss* per massimizzare la distanza tra classi diverse e minimizzarla tra campioni della stessa classe
-- **Normalizzazione L2**: tutti gli embedding vengono proiettati sulla sfera unitaria (norma = 1)
+- **Normalizzazione L2**: tutti gli embedding vengono proiettati sulla sfera unitaria (norma = 1) — e la **media** di più embedding va **rinormalizzata** (la media di vettori unitari è più corta di 1)
 - **Perché 512 dimensioni?** Compromesso tra potere discriminativo e velocità di confronto
 
-**Domanda tipica:** *"Come distingue una persona da un'altra?"*  
+**Domanda tipica:** *"Come distingue una persona da un'altra?"*
 → ArcFace converte il volto in un vettore di 512 numeri. La "posizione" di questo vettore nello spazio 512D è unica per ogni persona. Confrontiamo le posizioni invece delle immagini.
 
 ---
 
 #### 1.4 Cosine Similarity e Distance
+
 - **Prodotto scalare normalizzato**: `similarity = a · b` (con `||a|| = ||b|| = 1`)
 - **Cosine distance**: `d = 1 - similarity` → 0 = identici, 2 = opposti
 - **Soglia (threshold)**: 0.5 significa "accetto come match se la distanza è < 0.5"
 - **Perché cosine e non euclidea?** Gli embedding ArcFace sono ottimizzati per la distanza angolare
 
-**Domanda tipica:** *"Come decide se è la stessa persona?"*  
+**Domanda tipica:** *"Come decide se è la stessa persona?"*
 → Calcola la cosine distance tra l'embedding del volto rilevato e tutti gli embedding nel database. Se la distanza minima è sotto la soglia 0.5, è un match.
+
+---
+
+#### 1.5 Localizzazione su mappa (tracking)
+
+- **Omografia**: trasformazione proiettiva 3×3 tra due piani — qui dal piano del pavimento visto dalla camera alla planimetria; stimata da ≥4 corrispondenze con `cv2.findHomography`
+- **Modello pinhole e distanza da dimensione nota**: un oggetto di dimensione fisica nota (il viso) appare grande in pixel in modo inversamente proporzionale alla distanza → `d = k / h_px`
+- **Coordinate polari**: posizione = camera + distanza × direzione (angolo dal centro dell'inquadratura)
+- **Minimi quadrati**: come si stimano heading/FOV/k da pochi campioni di riferimento
+- **EMA (Exponential Moving Average)**: filtro che liscia il rumore delle misure (`s_t = α·x_t + (1−α)·s_{t−1}`)
+
+**Domanda tipica:** *"Come fai a sapere dove si trova la persona nella stanza?"*
+→ Se la camera vede il pavimento, un'omografia mappa i pixel a terra sulla planimetria. Se non lo vede (webcam da scrivania), si stima la distanza dalla dimensione del volto (modello pinhole) e l'angolo dalla posizione orizzontale nel frame: coordinate polari rispetto alla camera, calibrate mettendosi in 2-3 punti noti.
 
 ---
 
 ### LIVELLO 2 — Architettura Software
 
 #### 2.1 Threading in Python
+
 - **GIL (Global Interpreter Lock)**: Python esegue un thread Python alla volta, ma l'I/O e il codice C (OpenCV, NumPy) rilasciano il GIL
 - **Thread per la camera**: necessario perché `VideoCapture.read()` blocca in attesa del frame
 - **Lock e Queue**: `threading.Lock` per proteggere dati condivisi, `queue.Queue` per comunicazione thread-safe tra worker e Flask
+- **Double-checked locking**: l'inizializzazione del modello InsightFace è protetta da lock per evitare doppia init da più camera-thread
 
-**Domanda tipica:** *"Perché usi più thread?"*  
+**Domanda tipica:** *"Perché usi più thread?"*
 → La camera, la pipeline di riconoscimento e il server web devono girare in parallelo. Un singolo thread sarebbe sequenziale e il sistema andrebbe a 1-2 FPS.
 
 ---
 
 #### 2.2 Flask e Protocolli Web
-- **MJPEG**: protocollo multipart che invia frame JPEG in sequenza sulla stessa connessione HTTP. Il browser mostra "video" ma in realtà è una serie di immagini.
-- **SSE (Server-Sent Events)**: connessione HTTP long-lived, il server invia eventi JSON in push al browser. Più semplice di WebSocket per flussi unidirezionali.
-- **REST API**: endpoints `/api/persons`, `/api/enroll/*` seguono architettura REST (GET, POST, DELETE)
+
+- **MJPEG**: protocollo multipart che invia frame JPEG in sequenza sulla stessa connessione HTTP. Il browser mostra "video" ma in realtà è una serie di immagini
+- **SSE (Server-Sent Events)**: connessione HTTP long-lived, il server invia eventi JSON in push al browser. Più semplice di WebSocket per flussi unidirezionali
+- **REST API**: endpoints `/api/persons`, `/api/enroll/*`, `/api/calibration/*` seguono architettura REST (GET, POST, DELETE)
+- **Lazy encoding**: i frame vengono codificati in JPEG solo se c'è almeno un viewer collegato allo stream
 
 ---
 
 #### 2.3 SQLAlchemy ORM
+
 - **ORM (Object-Relational Mapping)**: mappa classi Python a tabelle SQL
 - **Repository pattern**: tutta la logica SQL è in `repository.py`, i moduli business logic non scrivono mai SQL grezzo
 - **Session e transaction**: `get_session()` è un context manager che fa commit automatico o rollback in caso di errore
+- **Tipi nativi**: i valori NumPy (`numpy.int64`, `numpy.float32`) vanno convertiti in tipi Python nativi prima del salvataggio, altrimenti il driver SQLite li serializza come BLOB
 
 ---
 
 #### 2.4 ONNX Runtime e GPU
+
 - **ONNX (Open Neural Network Exchange)**: formato portabile per modelli di rete neurale
 - **Execution Providers**: ONNX Runtime supporta diversi backend — `CUDAExecutionProvider` (NVIDIA GPU), `CPUExecutionProvider` (fallback)
 - **Perché GPU è più veloce?** Migliaia di core paralleli per operazioni matriciali vs decine di core CPU
@@ -445,65 +574,78 @@ python scripts/delete_person.py --name "Nome Cognome"
 ### LIVELLO 3 — Privacy e Sicurezza
 
 #### 3.1 GDPR e Dati Biometrici
+
 - **Articolo 9**: i dati biometrici sono "categoria speciale" — richiedono consenso esplicito
 - **Articolo 17**: diritto all'oblio — l'utente può chiedere cancellazione completa dei propri dati
 - **Privacy by design (Art. 25)**: la protezione deve essere integrata nel sistema, non aggiunta dopo
 
-**Domanda tipica:** *"Questo sistema è legale?"*  
-→ Sì se: (1) c'è consenso esplicito per ogni persona, (2) i dati sono cifrati, (3) c'è un meccanismo di cancellazione, (4) i dati vengono eliminati dopo la scadenza configurata.
+**Domanda tipica:** *"Questo sistema è legale?"*
+→ Sì se: (1) c'è consenso esplicito per ogni persona, (2) i dati sono cifrati, (3) c'è un meccanismo di cancellazione, (4) i dati vengono eliminati dopo la scadenza configurata. Il tracking della posizione va dichiarato nella finalità del consenso.
 
 ---
 
 #### 3.2 Crittografia Fernet
+
 - **AES-128-CBC**: cifratura simmetrica a blocchi — lo stesso segreto cifra e decifra
 - **HMAC-SHA256**: codice di autenticazione — garantisce che il ciphertext non sia stato manomesso
 - **Fernet**: combina AES + HMAC in un formato standardizzato e sicuro
-- **Key derivation**: la password (stringa) viene hasciata con SHA-256 per ottenere una chiave di 32 byte uniforme
+- **Key derivation**: la password (stringa) viene hashata con SHA-256 per ottenere una chiave di 32 byte uniforme
+
+---
+
+#### 3.3 Sicurezza Web
+
+- **Basic Auth + timing attack**: il confronto della password usa `hmac.compare_digest` (tempo costante) per non rivelare informazioni dal tempo di risposta
+- **CSRF e `Sec-Fetch-Site`**: i browser moderni dichiarano l'origine della richiesta in un header non falsificabile — le richieste mutanti cross-site vengono rifiutate
+- **Security headers**: `nosniff` (no MIME-sniffing), `X-Frame-Options: DENY` (no clickjacking), `Referrer-Policy`
 
 ---
 
 ### LIVELLO 4 — Domande Avanzate Possibili
 
 | Domanda | Risposta sintetica |
-|---|---|
+| --- | --- |
 | *Quante persone può gestire?* | Praticamente illimitato. Il confronto è una moltiplicazione matrice-vettore O(N×512), scalabile a migliaia. |
 | *Può essere ingannato con una foto?* | ArcFace è vulnerabile a spoofing 2D senza liveness detection. Il progetto non implementa anti-spoofing (fuori scope). |
-| *Perché calcoli la media di 5 campioni?* | Un singolo embedding può essere rumoroso (posa, illuminazione). La media di 5 campioni è più robusta. |
+| *Perché calcoli la media di 5 campioni?* | Un singolo embedding può essere rumoroso (posa, illuminazione). La media di 5 campioni, rinormalizzata L2, è più robusta. |
 | *Cosa succede se due persone hanno facce simili?* | Il threshold 0.5 è calibrato per avere falsi positivi <1%. Può essere abbassato (più restrittivo) aumentando però i falsi negativi. |
-| *Perché non salvare le immagini invece degli embedding?* | Gli embedding sono più leggeri (2 KB vs centinaia di KB), sono già "astratti" (non ricostruiscono il volto originale), e sono più facili da cifrare. |
+| *Perché non salvare le immagini invece degli embedding?* | Gli embedding sono più leggeri (2 KB vs centinaia di KB), non permettono di ricostruire il volto originale e sono facili da cifrare. |
 | *Cosa succede se si perde la chiave crittografica?* | Tutti gli embedding diventano inutilizzabili. Le persone devono essere re-iscritte. |
-| *Perché usare InsightFace invece di face_recognition?* | InsightFace (ArcFace) è più accurato (errore ~0.1% su LFW benchmark vs ~0.5% di face_recognition/dlib), supporta GPU nativamente, e ha modelli pre-addestrati aggiornati. |
+| *Perché usare InsightFace invece di face_recognition?* | InsightFace (ArcFace) è più accurato (errore ~0.1% su LFW vs ~0.5% di face_recognition/dlib), supporta GPU nativamente e ha modelli aggiornati. |
+| *Quanto è precisa la posizione sulla mappa?* | A livello di zona, non di centimetri: il volto sta ~1.5 m sopra il piano modellato e la sua dimensione varia ±10% tra persone. Lo smoothing EMA riduce il jitter. |
+| *Perché due modalità di calibrazione?* | L'omografia richiede punti sul pavimento: se la camera non lo inquadra è geometricamente inapplicabile. La modalità polare usa la dimensione del volto come riferimento metrico e funziona con qualunque inquadratura. |
 
 ---
 
 ### Schema Riassuntivo Studio
 
-```
+```text
 FONDAMENTALI (studia per primo)
 │
 ├── Come funziona un'immagine digitale
 ├── Cos'è una rete neurale convoluzionale (CNN) — concetto base
-├── Face Detection (RetinaFace, bounding box, landmark)
+├── Face Detection (SCRFD, bounding box, landmark)
 ├── Face Embedding (ArcFace, vettore 512D, normalizzazione L2)
 ├── Cosine Similarity / Distance
-└── Soglia di matching (threshold, false positive, false negative)
+├── Soglia di matching (threshold, false positive, false negative)
+└── Localizzazione: omografia · pinhole/distanza dal viso · coordinate polari · EMA
 
 ARCHITETTURA (studia dopo)
 │
-├── Threading Python (perché, Lock, Queue)
+├── Threading Python (perché, Lock, Queue, double-checked locking)
 ├── Flask (HTTP, MJPEG, SSE, REST)
 ├── SQLAlchemy ORM (tabelle, sessioni, repository pattern)
 └── ONNX Runtime + CUDA (execution providers, GPU speedup)
 
-PRIVACY (studia per la parte legale)
+PRIVACY E SICUREZZA (studia per la parte legale)
 │
 ├── GDPR Art. 9 (dati biometrici, consenso)
 ├── GDPR Art. 17 (diritto all'oblio)
 ├── GDPR Art. 25 (privacy by design)
-├── Cifratura simmetrica (AES, chiave, ciphertext)
-└── HMAC (integrità dei dati)
+├── Cifratura simmetrica (AES, chiave, ciphertext) + HMAC
+└── Sicurezza web (Basic Auth, CSRF, security headers)
 ```
 
 ---
 
-*Documentazione generata il 27/05/2026 — versione progetto `53f28cb`*
+*Documentazione aggiornata il 10/06/2026.*
