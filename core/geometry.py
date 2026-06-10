@@ -1,19 +1,29 @@
-"""Planar homography helpers for projecting camera-pixel points onto a floor map.
+"""Camera→floor-map projection helpers. Two calibration modes:
 
-A homography is a 3x3 matrix H mapping points from the camera image plane to the
-floor-plan plane. It is estimated from >=4 point correspondences
-(pixel (px,py) in the frame  <->  map (mx,my) on the floor plan) via cv2.findHomography.
-Projecting a frame point: (mx,my) = H @ (px,py,1), then divide by the third coord.
+HOMOGRAPHY — for cameras that see the floor. A 3x3 matrix H maps frame pixels on the
+ground plane to the floor plan, estimated from >=4 point correspondences via
+cv2.findHomography. Fails geometrically when the floor is not in view.
 
-Note: H models the *ground plane*. Face detections sit ~1.5 m above the floor, so the
-projected position is an approximation suitable for zone-level tracking, not centimetres.
+POLAR — for cameras that do NOT see the floor (e.g. a desk webcam looking across the
+room). Uses the pinhole model with the near-constant physical size of the human face:
+    distance  d = k / h_px          (h_px = face bbox height in pixels)
+    bearing   β = heading + s · (x_norm − 0.5)
+    position  P = C + d · (cos β, sin β)        (C = camera position on the map)
+The constants (heading, angular scale s ≈ horizontal FOV, distance constant k) are
+solved by least squares from >=2 reference samples: the subject stands at a known map
+point while the system records the face's x_norm and h_px.
+
+Both modes give zone-level accuracy (not centimetres): homography because faces sit
+~1.5 m above the modelled plane, polar because face size varies between people (±10%).
 """
+import math
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 PointPair = dict  # {"px": float, "py": float, "mx": float, "my": float}
+PolarSample = dict  # {"mx": float, "my": float, "x_norm": float, "h_px": float}
 
 
 def compute_homography(points: List[PointPair]) -> np.ndarray:
@@ -35,3 +45,60 @@ def project_point(H, px: float, py: float) -> Optional[Tuple[float, float]]:
     if v[2] == 0:
         return None
     return float(v[0] / v[2]), float(v[1] / v[2])
+
+
+def solve_polar_calibration(cam: Tuple[float, float], samples: List[PolarSample]) -> dict:
+    """Solve {heading, scale, k} from >=2 reference samples taken at known map points.
+
+    For each sample i (subject standing at map point P_i, face seen at x_norm_i with
+    height h_px_i):  β_i = atan2(P_i − C)  and  d_i = |P_i − C|.
+    Linear least-squares fit of  β_i = heading + scale · u_i  (u_i = x_norm_i − 0.5),
+    and  k = mean(d_i · h_px_i).
+    """
+    if len(samples) < 2:
+        raise ValueError("Servono almeno 2 campioni di riferimento")
+    cx, cy = float(cam[0]), float(cam[1])
+
+    u, beta, k_vals = [], [], []
+    for s in samples:
+        dx, dy = float(s["mx"]) - cx, float(s["my"]) - cy
+        d = math.hypot(dx, dy)
+        h_px = float(s["h_px"])
+        if d < 5.0:
+            raise ValueError("Un campione coincide con la posizione della camera")
+        if h_px <= 0:
+            raise ValueError("Campione con altezza volto non valida")
+        u.append(float(s["x_norm"]) - 0.5)
+        beta.append(math.atan2(dy, dx))
+        k_vals.append(d * h_px)
+
+    if max(u) - min(u) < 0.05:
+        raise ValueError(
+            "Campioni troppo vicini orizzontalmente nell'inquadratura: "
+            "posizionati in punti più distanti tra loro (sinistra/destra del campo visivo)"
+        )
+
+    # Unwrap bearings around the first sample so the linear fit is not broken by ±π wrap
+    beta = [beta[0] + math.remainder(b - beta[0], math.tau) for b in beta]
+
+    u_arr, b_arr = np.array(u), np.array(beta)
+    u_mean, b_mean = u_arr.mean(), b_arr.mean()
+    scale = float(((u_arr - u_mean) * (b_arr - b_mean)).sum() / ((u_arr - u_mean) ** 2).sum())
+    heading = float(b_mean - scale * u_mean)
+
+    return {
+        "cam": [cx, cy],
+        "heading": heading,
+        "scale": scale,
+        "k": float(np.mean(k_vals)),
+    }
+
+
+def project_polar(params: dict, x_norm: float, h_px: float) -> Optional[Tuple[float, float]]:
+    """Project a face (horizontal position + pixel height) onto the map via polar params."""
+    if h_px <= 0:
+        return None
+    cx, cy = params["cam"]
+    bearing = params["heading"] + params["scale"] * (x_norm - 0.5)
+    d = params["k"] / h_px
+    return float(cx + d * math.cos(bearing)), float(cy + d * math.sin(bearing))

@@ -47,13 +47,26 @@
       </div>
     </section>
 
-    <!-- Step 3: point pairs -->
+    <!-- Step 3: calibration mode + points -->
     <section id="workspace" class="space-y-3 hidden">
-      <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">3 · Punti corrispondenti (min 4)</h2>
-      <div class="text-xs bg-amber-950/40 border border-amber-900/50 text-amber-200/90 rounded-xl px-3 py-2">
+      <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">3 · Metodo di calibrazione</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+        <label id="mode-card-polar" class="cursor-pointer rounded-xl border px-3 py-2.5 transition-colors border-emerald-600 bg-emerald-950/40">
+          <input type="radio" name="calib-mode" value="polar" checked onchange="setMode('polar')" class="mr-1.5" />
+          <b>Distanza dal viso (polare)</b>
+          <p class="text-xs text-gray-400 mt-1">Per camere che <b>non inquadrano il pavimento</b> (es. webcam su scrivania).
+          Posizione stimata da dimensione del volto + angolo. Ti metti in 2-3 punti noti della stanza e catturi un campione per ciascuno.</p>
+        </label>
+        <label id="mode-card-homography" class="cursor-pointer rounded-xl border px-3 py-2.5 transition-colors border-gray-700 bg-gray-900">
+          <input type="radio" name="calib-mode" value="homography" onchange="setMode('homography')" class="mr-1.5" />
+          <b>Omografia (pavimento visibile)</b>
+          <p class="text-xs text-gray-400 mt-1">Per camere che <b>vedono il pavimento</b> (es. telecamere a soffitto).
+          Clicchi ≥4 punti a terra corrispondenti tra snapshot e planimetria.</p>
+        </label>
+      </div>
+      <div id="homography-warn" class="hidden text-xs bg-amber-950/40 border border-amber-900/50 text-amber-200/90 rounded-xl px-3 py-2">
         ⚠ Scegli punti <b>a terra</b> (dove le pareti incontrano il pavimento, angoli del pavimento,
-        i piedi dei mobili). La camera guarda la stanza di sbieco: l'omografia mappa il <b>piano del
-        pavimento</b>, quindi punti in alto (soffitto, cima dei mobili) falsano la calibrazione.
+        i piedi dei mobili). Punti in alto (soffitto, cima dei mobili) falsano la calibrazione.
       </div>
       <p id="hint" class="text-sm text-sky-400"></p>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -73,8 +86,17 @@
           </div>
         </div>
       </div>
+      <!-- Polar sample list + capture -->
+      <div id="polar-panel" class="space-y-2">
+        <div id="polar-samples" class="text-sm text-gray-400">Nessun campione.</div>
+        <button onclick="captureSample()" id="capture-btn"
+                class="px-4 py-1.5 text-sm rounded-lg bg-sky-600 hover:bg-sky-500 transition-colors font-semibold disabled:opacity-40 disabled:cursor-not-allowed" disabled>
+          Cattura campione
+        </button>
+      </div>
+
       <div class="flex items-center gap-2">
-        <span id="pair-count" class="text-sm text-gray-400 tabular-nums">0 coppie</span>
+        <span id="pair-count" class="text-sm text-gray-400 tabular-nums"></span>
         <div class="ml-auto flex gap-2">
           <button onclick="undoPoint()" class="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">Annulla ultimo</button>
           <button onclick="resetPoints()" class="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">Reset</button>
@@ -101,9 +123,30 @@ const COLORS = ['#ef4444','#f59e0b','#10b981','#3b82f6','#a855f7','#ec4899','#14
 
 let mapUrl = null;
 let currentCam = null;
+let mode = 'polar';        // 'polar' | 'homography'
+
+// homography state
 let srcPts = [];   // {natX,natY,pctX,pctY}
 let dstPts = [];
 let awaiting = 'src';  // 'src' → click snapshot next; 'dst' → click map next
+
+// polar state
+let polarCam = null;       // camera position on the map {natX,natY,pctX,pctY}
+let pendingPoint = null;   // map point where the subject is standing, awaiting capture
+let polarSamples = [];     // {mx,my,pctX,pctY,x_norm,h_px}
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('mode-card-polar').className =
+    'cursor-pointer rounded-xl border px-3 py-2.5 transition-colors ' +
+    (m === 'polar' ? 'border-emerald-600 bg-emerald-950/40' : 'border-gray-700 bg-gray-900');
+  document.getElementById('mode-card-homography').className =
+    'cursor-pointer rounded-xl border px-3 py-2.5 transition-colors ' +
+    (m === 'homography' ? 'border-emerald-600 bg-emerald-950/40' : 'border-gray-700 bg-gray-900');
+  document.getElementById('polar-panel').classList.toggle('hidden', m !== 'polar');
+  document.getElementById('homography-warn').classList.toggle('hidden', m !== 'homography');
+  resetPoints();
+}
 
 // ── Floor plan ────────────────────────────────────────────────────────────────
 function loadMap() {
@@ -173,12 +216,20 @@ function imgCoords(img, e) {
 }
 
 document.getElementById('snap').addEventListener('click', e => {
+  if (mode === 'polar') { flash('In modalità polare non si clicca lo snapshot: scegli i punti sulla PLANIMETRIA.'); return; }
   if (awaiting !== 'src') { flash('Ora clicca il punto corrispondente sulla PLANIMETRIA.'); return; }
   srcPts.push(imgCoords(e.target, e));
   awaiting = 'dst';
   redraw();
 });
 document.getElementById('mapimg').addEventListener('click', e => {
+  if (mode === 'polar') {
+    const p = imgCoords(e.target, e);
+    if (!polarCam) polarCam = p;     // first click = camera position
+    else pendingPoint = p;           // next clicks = where the subject stands
+    redraw();
+    return;
+  }
   if (awaiting !== 'dst') { flash('Prima clicca un punto sullo SNAPSHOT.'); return; }
   dstPts.push(imgCoords(e.target, e));
   awaiting = 'src';
@@ -193,13 +244,32 @@ function drawMarkers(wrapId, pts) {
     d.className = 'pt';
     d.style.left = p.pctX + '%';
     d.style.top = p.pctY + '%';
-    d.style.background = COLORS[i % COLORS.length];
-    d.textContent = i + 1;
+    d.style.background = p.color || COLORS[i % COLORS.length];
+    d.textContent = p.label !== undefined ? p.label : i + 1;
     wrap.appendChild(d);
   });
 }
 
 function redraw() {
+  if (mode === 'polar') {
+    drawMarkers('snap-wrap', []);
+    const markers = [];
+    if (polarCam) markers.push({ ...polarCam, label: 'C', color: '#0f172a' });
+    polarSamples.forEach((s, i) => markers.push({ pctX: s.pctX, pctY: s.pctY, label: i + 1 }));
+    if (pendingPoint) markers.push({ ...pendingPoint, label: '?', color: '#64748b' });
+    drawMarkers('map-wrap', markers);
+
+    document.getElementById('capture-btn').disabled = !(polarCam && pendingPoint);
+    document.getElementById('save-btn').disabled = !(polarCam && polarSamples.length >= 2);
+    document.getElementById('pair-count').textContent = `${polarSamples.length} campioni`;
+    document.getElementById('hint').textContent = !polarCam
+      ? 'Clicca sulla PLANIMETRIA il punto dove si trova la CAMERA.'
+      : !pendingPoint
+        ? 'Mettiti in un punto della stanza, poi clicca quel punto sulla PLANIMETRIA.'
+        : 'Resta fermo nel punto scelto, volto verso la camera, e premi "Cattura campione". Servono ≥2 campioni in zone diverse (sinistra/destra).';
+    renderSampleList();
+    return;
+  }
   drawMarkers('snap-wrap', srcPts);
   drawMarkers('map-wrap', dstPts);
   const pairs = Math.min(srcPts.length, dstPts.length);
@@ -210,30 +280,80 @@ function redraw() {
     : 'Ora clicca lo STESSO punto a terra sulla PLANIMETRIA.';
 }
 
+function renderSampleList() {
+  const el = document.getElementById('polar-samples');
+  if (!polarSamples.length) { el.textContent = polarCam ? 'Nessun campione ancora catturato.' : 'Posiziona prima la camera sulla mappa.'; return; }
+  el.innerHTML = polarSamples.map((s, i) =>
+    `<span class="inline-flex items-center gap-1 mr-3">
+       <span class="w-4 h-4 rounded-full text-[10px] text-white flex items-center justify-center" style="background:${COLORS[i % COLORS.length]}">${i + 1}</span>
+       volto ${Math.round(s.h_px)}px @ x=${(s.x_norm * 100).toFixed(0)}%
+     </span>`).join('');
+}
+
+function captureSample() {
+  if (!polarCam || !pendingPoint) return;
+  const btn = document.getElementById('capture-btn');
+  btn.disabled = true; btn.textContent = '...';
+  fetch(`/api/calibration/${encodeURIComponent(currentCam)}/sample`, { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      btn.textContent = 'Cattura campione';
+      if (d.error) { flash(d.error); btn.disabled = false; return; }
+      polarSamples.push({ mx: pendingPoint.natX, my: pendingPoint.natY, pctX: pendingPoint.pctX, pctY: pendingPoint.pctY, x_norm: d.x_norm, h_px: d.h_px });
+      pendingPoint = null;
+      document.getElementById('msg').textContent = `✓ Campione ${polarSamples.length} acquisito.`;
+      redraw();
+    })
+    .catch(() => { btn.textContent = 'Cattura campione'; btn.disabled = false; flash('Errore di rete.'); });
+}
+
 function undoPoint() {
+  if (mode === 'polar') {
+    if (pendingPoint) pendingPoint = null;
+    else if (polarSamples.length) polarSamples.pop();
+    else polarCam = null;
+    redraw();
+    return;
+  }
   if (awaiting === 'dst' && srcPts.length) srcPts.pop();        // last action was a src click
   else if (dstPts.length) { dstPts.pop(); awaiting = 'dst'; }   // undo last completed pair's dst
   else if (srcPts.length) srcPts.pop();
   if (srcPts.length === dstPts.length) awaiting = 'src';
   redraw();
 }
-function resetPoints() { srcPts = []; dstPts = []; awaiting = 'src'; document.getElementById('msg').textContent = ''; redraw(); }
+function resetPoints() {
+  srcPts = []; dstPts = []; awaiting = 'src';
+  polarCam = null; pendingPoint = null; polarSamples = [];
+  document.getElementById('msg').textContent = '';
+  redraw();
+}
 
 function flash(t) { const m = document.getElementById('msg'); m.textContent = '⚠ ' + t; }
 
 function saveCalibration() {
-  const pairs = Math.min(srcPts.length, dstPts.length);
-  if (pairs < 4) { flash('Servono almeno 4 coppie.'); return; }
-  const points = [];
-  for (let i = 0; i < pairs; i++) {
-    points.push({ px: srcPts[i].natX, py: srcPts[i].natY, mx: dstPts[i].natX, my: dstPts[i].natY });
+  let payload;
+  if (mode === 'polar') {
+    if (!polarCam || polarSamples.length < 2) { flash('Servono la posizione camera e almeno 2 campioni.'); return; }
+    payload = {
+      mode: 'polar',
+      camera: { mx: polarCam.natX, my: polarCam.natY },
+      samples: polarSamples.map(s => ({ mx: s.mx, my: s.my, x_norm: s.x_norm, h_px: s.h_px })),
+    };
+  } else {
+    const pairs = Math.min(srcPts.length, dstPts.length);
+    if (pairs < 4) { flash('Servono almeno 4 coppie.'); return; }
+    const points = [];
+    for (let i = 0; i < pairs; i++) {
+      points.push({ px: srcPts[i].natX, py: srcPts[i].natY, mx: dstPts[i].natX, my: dstPts[i].natY });
+    }
+    payload = { mode: 'homography', points };
   }
   const btn = document.getElementById('save-btn');
   btn.disabled = true; btn.textContent = 'Salvataggio...';
   fetch(`/api/calibration/${encodeURIComponent(currentCam)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ points }),
+    body: JSON.stringify(payload),
   }).then(r => r.json()).then(d => {
     btn.textContent = 'Salva calibrazione';
     if (d.error) { flash(d.error); btn.disabled = false; return; }
@@ -247,12 +367,16 @@ function loadCalibrated() {
   fetch('/api/calibration').then(r => r.json()).then(list => {
     const el = document.getElementById('calibrated-list');
     if (!list.length) { el.textContent = 'Nessuna camera ancora calibrata.'; return; }
-    el.innerHTML = list.map(c =>
-      `<div class="flex items-center gap-2 py-1">
+    el.innerHTML = list.map(c => {
+      const detail = c.mode === 'polar'
+        ? `polare, ${(c.raw.samples || []).length} campioni`
+        : `omografia, ${(c.raw.points || []).length} punti`;
+      return `<div class="flex items-center gap-2 py-1">
          <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
-         <span>Camera <b>${esc(c.camera)}</b> — ${c.points.length} punti</span>
+         <span>Camera <b>${esc(c.camera)}</b> — ${detail}</span>
          <span class="text-gray-600 text-xs">${esc(new Date(c.updated_at).toLocaleString('it-IT'))}</span>
-       </div>`).join('');
+       </div>`;
+    }).join('');
   });
 }
 

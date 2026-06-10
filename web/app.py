@@ -14,7 +14,7 @@ from loguru import logger
 
 from config.settings import get_settings
 from core.detector import detect_and_encode
-from core.geometry import compute_homography
+from core.geometry import compute_homography, solve_polar_calibration
 from database.models import Person
 from database.repository import CalibrationRepository, PersonRepository
 from database.session import get_session
@@ -335,35 +335,72 @@ def camera_snapshot(camera_id: str):
 def list_calibration():
     with get_session() as session:
         calibs = CalibrationRepository(session).get_all()
-        return jsonify([
-            {
+        out = []
+        for c in calibs:
+            raw = json.loads(c.points_json)
+            if isinstance(raw, list):  # legacy homography rows
+                raw = {"mode": "homography", "points": raw}
+            out.append({
                 "camera": c.camera_id,
-                "points": json.loads(c.points_json),
+                "mode": raw.get("mode", "homography"),
+                "raw": raw,
                 "updated_at": c.updated_at.isoformat(),
-            }
-            for c in calibs
-        ])
+            })
+        return jsonify(out)
+
+
+@app.route("/api/calibration/<camera_id>/sample", methods=["POST"])
+def calibration_sample(camera_id: str):
+    """Detect the (single) face in the current frame and return its horizontal
+    position + pixel height — one polar-calibration reference sample."""
+    frame = broadcaster.get_raw_frame(camera_id)
+    if frame is None:
+        return jsonify({"error": "Nessun frame disponibile dalla camera"}), 503
+
+    faces = detect_and_encode(frame)
+    if not faces:
+        return jsonify({"error": "Nessun volto rilevato. Mettiti nel punto scelto e riprova."}), 422
+    if len(faces) > 1:
+        return jsonify({"error": "Più volti nell'inquadratura. Assicurati di essere solo."}), 422
+
+    (top, right, bottom, left), _ = faces[0]
+    frame_w = frame.shape[1]
+    return jsonify({
+        "x_norm": float((left + right) / 2.0 / frame_w),
+        "h_px": float(bottom - top),
+    })
 
 
 @app.route("/api/calibration/<camera_id>", methods=["POST"])
 def save_calibration(camera_id: str):
     data = request.get_json(silent=True) or {}
-    points = data.get("points") or []
-    if len(points) < 4:
-        return jsonify({"error": "Servono almeno 4 punti di calibrazione"}), 400
+    mode = data.get("mode", "homography")
+
     try:
-        homography = compute_homography(points)
+        if mode == "polar":
+            cam = data.get("camera") or {}
+            samples = data.get("samples") or []
+            params = solve_polar_calibration((cam["mx"], cam["my"]), samples)
+            raw = {"camera": cam, "samples": samples}
+            detail = f"{len(samples)} campioni"
+        else:
+            points = data.get("points") or []
+            if len(points) < 4:
+                return jsonify({"error": "Servono almeno 4 punti di calibrazione"}), 400
+            params = {"H": compute_homography(points).tolist()}
+            raw = {"points": points}
+            detail = f"{len(points)} punti"
     except (ValueError, KeyError, TypeError) as exc:
-        return jsonify({"error": f"Omografia non calcolabile: {exc}"}), 400
+        return jsonify({"error": f"Calibrazione non calcolabile: {exc}"}), 400
 
     with get_session() as session:
-        CalibrationRepository(session).upsert(camera_id, points, homography)
+        CalibrationRepository(session).upsert(camera_id, mode, raw, params)
 
     if broadcaster.pipeline:
         broadcaster.pipeline.force_reload()
 
-    logger.success(f"[Calibrazione] Camera {camera_id} calibrata con {len(points)} punti.")
-    return jsonify({"message": f"Calibrazione camera {camera_id} salvata ({len(points)} punti)."})
+    logger.success(f"[Calibrazione] Camera {camera_id} calibrata in modalità {mode} ({detail}).")
+    return jsonify({"message": f"Calibrazione {mode} camera {camera_id} salvata ({detail})."})
 
 
 @app.route("/api/positions/map")

@@ -151,6 +151,12 @@ class PersonRepository:
 
 
 class CalibrationRepository:
+    """Stores per-camera calibration. Two modes share the same columns via a JSON
+    envelope: `points_json` holds the raw user input (re-editable), `homography_json`
+    holds the computed projector params — {"mode":"homography","H":[...]} or
+    {"mode":"polar","cam":[x,y],"heading":...,"scale":...,"k":...}. Legacy rows
+    (plain 3x3 list) are read as homography."""
+
     def __init__(self, session: Session):
         self.session = session
 
@@ -164,19 +170,29 @@ class CalibrationRepository:
             .first()
         )
 
-    def upsert(self, camera_id: str, points: List[dict], homography: np.ndarray) -> None:
-        points_json = json.dumps(points)
-        homography_json = json.dumps(homography.tolist())
+    def load_projectors(self) -> List[dict]:
+        """Return parsed [{camera_id, mode, params}] for every calibrated camera."""
+        result = []
+        for row in self.get_all():
+            data = json.loads(row.homography_json)
+            if isinstance(data, list):  # legacy plain 3x3 matrix
+                data = {"mode": "homography", "H": data}
+            result.append({"camera_id": row.camera_id, "mode": data.get("mode", "homography"), "params": data})
+        return result
+
+    def upsert(self, camera_id: str, mode: str, raw: dict, params: dict) -> None:
+        points_json = json.dumps({"mode": mode, **raw})
+        params_json = json.dumps({"mode": mode, **params})
         existing = self.get(camera_id)
         if existing:
             existing.points_json = points_json
-            existing.homography_json = homography_json
+            existing.homography_json = params_json
             existing.updated_at = datetime.utcnow()
         else:
             self.session.add(
                 CameraCalibration(
                     camera_id=camera_id,
                     points_json=points_json,
-                    homography_json=homography_json,
+                    homography_json=params_json,
                 )
             )
