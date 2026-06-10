@@ -71,12 +71,12 @@
       <p id="hint" class="text-sm text-sky-400"></p>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div>
-          <div class="flex items-center justify-between mb-1">
-            <span class="text-xs text-gray-400">Snapshot camera <span id="cam-label"></span></span>
-            <button onclick="refreshSnapshot()" class="text-xs text-gray-500 hover:text-gray-300">↻ aggiorna</button>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
+            <span class="text-xs text-gray-400">Live camera <span id="cam-label"></span></span>
           </div>
           <div class="img-wrap bg-gray-900" id="snap-wrap">
-            <img id="snap" alt="snapshot" />
+            <img id="snap" alt="live camera" />
           </div>
         </div>
         <div>
@@ -199,13 +199,14 @@ function selectCamera(id, btn) {
   if (!mapUrl) { alert('Carica prima una planimetria.'); return; }
   document.getElementById('workspace').classList.remove('hidden');
   document.getElementById('mapimg').src = mapUrl;
-  refreshSnapshot();
+  startLiveFeed();
   resetPoints();
 }
 
-function refreshSnapshot() {
+function startLiveFeed() {
   if (currentCam == null) return;
-  document.getElementById('snap').src = `/api/cameras/${encodeURIComponent(currentCam)}/snapshot?t=${Date.now()}`;
+  // MJPEG live stream — same feed as the dashboard, with detection boxes drawn
+  document.getElementById('snap').src = `/stream/${encodeURIComponent(currentCam)}`;
 }
 
 // ── Point picking ───────────────────────────────────────────────────────────────
