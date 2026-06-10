@@ -161,8 +161,8 @@ flowchart LR
 Il sistema salva nel tempo la posizione di ogni soggetto **identificato** (cadenza configurabile, default 1 punto/s per persona per camera) e la proietta su una planimetria condivisa. Il re-identification tra camere è automatico: la stessa persona ha lo stesso `person_id` ovunque grazie all'embedding ArcFace.
 
 <div align="center">
-<img src="docs/floorplan-example.png" width="560" alt="Planimetria di esempio (stanza fittizia) con posizione camera e campo visivo" />
-<br/><sub><i>Planimetria di esempio (stanza fittizia) — i soggetti appaiono come pallini live nella vista Mappa.<br/>La propria planimetria si carica dalla pagina Calibra e resta solo in locale (la cartella è esclusa da git).</i></sub>
+<img src="docs/floorplan-example.png" width="560" alt="Planimetria di esempio con posizione camera, campo visivo e soggetti tracciati" />
+<br/><sub><i>Planimetria di esempio — i soggetti identificati appaiono come pallini verdi nella vista Mappa live.<br/>La propria planimetria si carica dalla pagina Calibra e resta solo in locale (la cartella è esclusa da git).</i></sub>
 </div>
 
 ### Due modalità di calibrazione (pagina `/calibrate`, con live feed della camera)
