@@ -15,6 +15,8 @@ from loguru import logger
 from config.settings import get_settings
 from core.detector import detect_and_encode
 from core.geometry import compute_homography, solve_polar_calibration
+from core.validation import validation_manager, validation_root
+from core.validation_metrics import VERDICTS, compute_and_export
 from database.models import Person
 from database.repository import CalibrationRepository, PersonRepository
 from database.session import get_session
@@ -292,6 +294,180 @@ def api_metrics():
     if broadcaster.pipeline is not None:
         perf = broadcaster.pipeline.perf.snapshot()
     return jsonify({"perf": perf, "resources": get_resource_metrics()})
+
+
+# ── Validation / test mode ────────────────────────────────────────────────────
+
+def _session_dir(session_id: str):
+    """Resolve a session folder safely (reject path traversal)."""
+    root = validation_root().resolve()
+    target = (root / session_id).resolve()
+    if target.is_dir() and root in target.parents:
+        return target
+    return None
+
+
+def _read_jsonl_file(path: Path) -> list:
+    if not path.exists():
+        return []
+    out = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    return out
+
+
+@app.route("/validation")
+def validation_page():
+    return send_from_directory(STATIC_DIR, "validation.html")
+
+
+@app.route("/api/validation/start", methods=["POST"])
+def validation_start():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if name and not _NAME_RE.match(name):
+        return jsonify({"error": "Nome sessione non valido"}), 400
+    with get_session() as session:
+        enrolled = [
+            {"id": p.id, "name": p.name}
+            for p in session.query(Person)
+            .filter(Person.active == True, Person.consent_given == True)
+            .order_by(Person.name)
+            .all()
+        ]
+    try:
+        info = validation_manager.start(name, enrolled, _settings.match_threshold)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+    return jsonify({**info, "enrolled": enrolled, "threshold": _settings.match_threshold})
+
+
+@app.route("/api/validation/stop", methods=["POST"])
+def validation_stop():
+    return jsonify(validation_manager.stop())
+
+
+@app.route("/api/validation/status")
+def validation_status():
+    return jsonify(validation_manager.status())
+
+
+@app.route("/api/validation/sessions")
+def validation_sessions():
+    root = validation_root()
+    out = []
+    if root.is_dir():
+        for d in sorted(root.iterdir(), reverse=True):
+            manifest = d / "session.json"
+            if manifest.is_file():
+                try:
+                    out.append(json.loads(manifest.read_text(encoding="utf-8")))
+                except Exception:
+                    pass
+    return jsonify(out)
+
+
+@app.route("/api/validation/<session_id>/detections")
+def validation_detections(session_id: str):
+    d = _session_dir(session_id)
+    if d is None:
+        return jsonify({"error": "Sessione non trovata"}), 404
+    dets = _read_jsonl_file(d / "detections.jsonl")
+    labels = {
+        (str(r["camera_id"]), int(r["frame_index"]), int(r["face_id"])): r["verdict"]
+        for r in _read_jsonl_file(d / "labels.jsonl")
+    }
+    for det in dets:
+        det["verdict"] = labels.get(
+            (str(det["camera_id"]), int(det["frame_index"]), int(det["face_id"]))
+        )
+    return jsonify(dets)
+
+
+@app.route("/api/validation/<session_id>/labels", methods=["POST"])
+def validation_save_labels(session_id: str):
+    d = _session_dir(session_id)
+    if d is None:
+        return jsonify({"error": "Sessione non trovata"}), 404
+    data = request.get_json(silent=True) or {}
+    items = data.get("labels") if "labels" in data else [data]
+    rows = []
+    try:
+        for it in items:
+            if it.get("verdict") not in VERDICTS:
+                return jsonify({"error": f"Verdetto non valido: {it.get('verdict')}"}), 400
+            rows.append({
+                "camera_id": str(it["camera_id"]),
+                "frame_index": int(it["frame_index"]),
+                "face_id": int(it["face_id"]),
+                "verdict": it["verdict"],
+            })
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "Payload label non valido"}), 400
+    with (d / "labels.jsonl").open("a", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    return jsonify({"saved": len(rows)})
+
+
+@app.route("/api/validation/<session_id>/metrics", methods=["POST"])
+def validation_compute_metrics(session_id: str):
+    d = _session_dir(session_id)
+    if d is None:
+        return jsonify({"error": "Sessione non trovata"}), 404
+    return jsonify(compute_and_export(d))
+
+
+@app.route("/api/validation/<session_id>/video/<camera_id>")
+def validation_video(session_id: str, camera_id: str):
+    d = _session_dir(session_id)
+    if d is None:
+        return jsonify({"error": "Sessione non trovata"}), 404
+    fname = f"camera_{camera_id}.mp4"
+    if not (d / fname).is_file():
+        return jsonify({"error": "Video non trovato"}), 404
+    return send_from_directory(d, fname, mimetype="video/mp4", conditional=True)
+
+
+# Frame-by-frame review: the recorded mp4 uses a codec browsers can't decode in
+# <video>, so the review UI requests decoded JPEG frames by index (exact sync with
+# the detection log). One cached VideoCapture per file makes sequential playback fast.
+_frame_caps: dict = {}
+_frame_caps_lock = threading.Lock()
+
+
+def _read_frame(path: str, index: int):
+    with _frame_caps_lock:
+        c = _frame_caps.get(path)
+        if c is None:
+            c = {"cap": cv2.VideoCapture(path), "next": -1}
+            _frame_caps[path] = c
+        cap = c["cap"]
+        if c["next"] != index:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+        ok, frame = cap.read()
+        c["next"] = index + 1 if ok else -1
+        return frame if ok else None
+
+
+@app.route("/api/validation/<session_id>/frame/<camera_id>/<int:index>")
+def validation_frame(session_id: str, camera_id: str, index: int):
+    d = _session_dir(session_id)
+    if d is None:
+        return jsonify({"error": "Sessione non trovata"}), 404
+    path = d / f"camera_{camera_id}.mp4"
+    if not path.is_file():
+        return jsonify({"error": "Video non trovato"}), 404
+    frame = _read_frame(str(path), max(0, index))
+    if frame is None:
+        return jsonify({"error": "Frame non disponibile"}), 404
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not ok:
+        return jsonify({"error": "Encoding fallito"}), 500
+    return Response(buf.tobytes(), mimetype="image/jpeg")
 
 
 # ── Floor-plan map + calibration (Phase 2) ────────────────────────────────────

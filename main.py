@@ -88,6 +88,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000, help="Porta web (default: 8000)")
     parser.add_argument("--benchmark", action="store_true",
                         help="Esegui il benchmark prestazioni e termina (report in data/benchmarks/)")
+    parser.add_argument("--validation", nargs="?", const="", default=None, metavar="NOME",
+                        help="Avvia una sessione di validazione all'avvio (registra video + detections)")
     args = parser.parse_args()
 
     show_local = args.local or not args.web
@@ -115,6 +117,18 @@ def main() -> None:
     cameras = [CameraStream(src).start() for src in _settings.cameras]
     pipeline = FaceIdPipeline()
     broadcaster.pipeline = pipeline
+
+    if args.validation is not None:
+        from core.validation import validation_manager
+        from database.models import Person
+        with get_session() as session:
+            enrolled = [
+                {"id": p.id, "name": p.name}
+                for p in session.query(Person)
+                .filter(Person.active == True, Person.consent_given == True).all()
+            ]
+        info = validation_manager.start(args.validation, enrolled, _settings.match_threshold)
+        logger.info(f"Validazione: sessione '{info['session_id']}' — registrazione attiva")
 
     result_queues: Dict[str, "queue.Queue[_QueueItem]"] = (
         {cam.camera_id: queue.Queue(maxsize=2) for cam in cameras}
@@ -164,6 +178,9 @@ def main() -> None:
         logger.info("Interruzione ricevuta")
         stop_event.set()
     finally:
+        from core.validation import validation_manager
+        if validation_manager.is_active():
+            validation_manager.stop()
         for cam in cameras:
             cam.stop()
         Display.close_all()

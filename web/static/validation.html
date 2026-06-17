@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Validation — Face ID</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    body { background:#030712; }
+    ::-webkit-scrollbar { width:6px; height:6px; }
+    ::-webkit-scrollbar-thumb { background:#374151; border-radius:3px; }
+    tr.sel { outline:2px solid #38bdf8; outline-offset:-2px; }
+    tr.cur { background:rgba(56,189,248,.10); }
+    input[type=range] { accent-color:#38bdf8; }
+  </style>
+</head>
+<body class="text-gray-100 min-h-screen">
+
+  <header class="flex items-center gap-3 px-6 py-3 border-b border-gray-800/60 bg-gray-950/80 sticky top-0 z-20">
+    <a href="/" class="text-gray-500 hover:text-gray-300 text-sm">← Face ID</a>
+    <span class="font-semibold text-sm tracking-wide ml-2">Validation / test mode</span>
+    <span id="rec-badge" class="ml-3 hidden items-center gap-1 text-xs text-red-400">
+      <span class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span> REC <span id="rec-frames"></span>
+    </span>
+  </header>
+
+  <main class="p-5 max-w-7xl mx-auto space-y-5">
+
+    <!-- 1 · Session control -->
+    <section class="bg-gray-900 rounded-2xl p-4 space-y-3">
+      <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">1 · Sessione di registrazione</h2>
+      <div class="flex flex-wrap items-center gap-2 text-sm">
+        <input id="sess-name" type="text" placeholder="nome sessione (opzionale)"
+               class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 focus:outline-none focus:border-emerald-500" />
+        <button onclick="startSession()" id="start-btn"
+                class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-semibold transition-colors">Avvia</button>
+        <button onclick="stopSession()" id="stop-btn"
+                class="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 font-semibold transition-colors disabled:opacity-40" disabled>Ferma</button>
+        <span id="sess-status" class="text-gray-500 ml-2"></span>
+      </div>
+      <p class="text-[11px] text-gray-600">
+        ⚠ La registrazione salva immagini (video annotato) — solo per l'esperimento, sotto data/validation/, fuori dal DB e mai versionato su git.
+      </p>
+    </section>
+
+    <!-- 2 · Review -->
+    <section class="space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">2 · Revisione e labeling</h2>
+        <select id="session-sel" onchange="loadSession()"
+                class="ml-auto bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm focus:outline-none">
+          <option value="">— scegli una sessione —</option>
+        </select>
+        <button onclick="refreshSessions()" class="text-xs text-gray-500 hover:text-gray-300">↻</button>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- Left: frame player -->
+        <div class="space-y-2">
+          <div class="flex items-center gap-2 text-xs text-gray-400">
+            <span>Camera</span>
+            <select id="cam-sel" onchange="switchCamera()" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 focus:outline-none"></select>
+            <span id="frame-info" class="ml-auto tabular-nums text-gray-500"></span>
+          </div>
+          <div class="rounded-xl bg-black aspect-video flex items-center justify-center overflow-hidden">
+            <img id="frame-img" class="w-full h-full object-contain" alt="frame" />
+            <span id="frame-empty" class="text-gray-600 text-sm">Scegli una sessione</span>
+          </div>
+          <div class="flex items-center gap-2 text-xs">
+            <button onclick="playPause()" id="play-btn" class="px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 w-16">▶ Play</button>
+            <button onclick="setFrame(curIndex-1)" class="px-2 py-1 rounded bg-gray-800 hover:bg-gray-700">◀</button>
+            <button onclick="setFrame(curIndex+1)" class="px-2 py-1 rounded bg-gray-800 hover:bg-gray-700">▶</button>
+            <input id="frame-slider" type="range" min="0" max="0" value="0" oninput="setFrame(+this.value)" class="flex-1" />
+          </div>
+        </div>
+
+        <!-- Right: detections + labeling -->
+        <div class="space-y-2">
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <select id="filter-id" onchange="renderRows()" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 focus:outline-none"></select>
+            <select id="filter-status" onchange="renderRows()" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 focus:outline-none">
+              <option value="all">tutte</option>
+              <option value="unlabelled" selected>non etichettate</option>
+              <option value="labelled">etichettate</option>
+            </select>
+            <span id="progress" class="ml-auto tabular-nums text-gray-400"></span>
+          </div>
+
+          <div class="text-[11px] text-gray-500 leading-relaxed">
+            Seleziona una riga (o clicca sul video sul frame), poi tasti <b>1</b>–<b>5</b> (avanza in automatico). Bulk: applica un verdetto a tutte le righe filtrate non etichettate.
+          </div>
+          <div class="flex flex-wrap gap-1" id="bulk-bar"></div>
+
+          <div class="bg-gray-900 rounded-2xl overflow-auto max-h-[44vh]">
+            <table class="w-full text-xs text-left tabular-nums">
+              <thead class="text-gray-500 sticky top-0 bg-gray-900">
+                <tr>
+                  <th class="py-1.5 px-2 font-medium">Frame</th>
+                  <th class="py-1.5 px-2 font-medium">Predetto</th>
+                  <th class="py-1.5 px-2 font-medium text-right">Conf</th>
+                  <th class="py-1.5 px-2 font-medium text-right">Dist</th>
+                  <th class="py-1.5 px-2 font-medium">Verdetto</th>
+                </tr>
+              </thead>
+              <tbody id="rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3 · Metrics -->
+    <section class="space-y-3">
+      <div class="flex items-center gap-2">
+        <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">3 · Metriche</h2>
+        <button onclick="computeMetrics()" id="metrics-btn"
+                class="ml-auto px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-sm font-semibold transition-colors disabled:opacity-40" disabled>
+          Calcola metriche
+        </button>
+      </div>
+      <div id="metrics-out" class="grid grid-cols-1 lg:grid-cols-2 gap-4 hidden">
+        <div id="metrics-cards" class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-sm"></div>
+        <div class="bg-gray-900 rounded-2xl p-3">
+          <div class="text-[11px] text-gray-500 mb-1">Curva DET (FAR vs FRR) — EER evidenziato</div>
+          <canvas id="det-chart" height="160"></canvas>
+        </div>
+      </div>
+      <p id="metrics-note" class="text-[11px] text-gray-600"></p>
+    </section>
+
+  </main>
+
+<script>
+const FPS = 15;  // deve combaciare con _NOMINAL_FPS del recorder
+const VERDICTS = [
+  { key: 'corretta',             label: 'Corretta (TP)',          color: '#10b981', k: '1' },
+  { key: 'falso_rifiuto',        label: 'Falso rifiuto (FN)',     color: '#f59e0b', k: '2' },
+  { key: 'falsa_accettazione',   label: 'Falsa accettazione (FP)',color: '#ef4444', k: '3' },
+  { key: 'scambio',              label: 'Scambio persona',        color: '#fb923c', k: '4' },
+  { key: 'sconosciuto_corretto', label: 'Sconosciuto OK (TN)',    color: '#38bdf8', k: '5' },
+];
+const VMAP = Object.fromEntries(VERDICTS.map(v => [v.key, v]));
+
+let sessionId = null;
+let detections = [];
+let cameras = [];
+let curCam = null;
+let curIndex = 0;
+let maxIndex = 0;
+let selectedIdx = -1;     // index into the currently rendered rows
+let renderedKeys = [];    // detection array-indexes currently shown
+let playTimer = null;
+let detChart = null;
+
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// ── Session control ──────────────────────────────────────────────────────────
+function pollStatus() {
+  fetch('/api/validation/status').then(r => r.json()).then(s => {
+    const badge = document.getElementById('rec-badge');
+    if (s.active) {
+      badge.classList.remove('hidden'); badge.classList.add('flex');
+      const f = Object.values(s.frames || {}).reduce((a, b) => a + b, 0);
+      document.getElementById('rec-frames').textContent = `· ${s.session_id} · ${f} frame`;
+      document.getElementById('start-btn').disabled = true;
+      document.getElementById('stop-btn').disabled = false;
+      document.getElementById('sess-status').textContent = 'registrazione attiva';
+    } else {
+      badge.classList.add('hidden'); badge.classList.remove('flex');
+      document.getElementById('start-btn').disabled = false;
+      document.getElementById('stop-btn').disabled = true;
+    }
+  }).catch(() => {});
+}
+setInterval(pollStatus, 1500); pollStatus();
+
+function startSession() {
+  const name = document.getElementById('sess-name').value.trim();
+  fetch('/api/validation/start', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name }) })
+    .then(r => r.json()).then(d => {
+      if (d.error) { alert(d.error); return; }
+      document.getElementById('sess-status').textContent = `avviata: ${d.session_id}`;
+      pollStatus();
+    }).catch(() => alert('Errore di rete.'));
+}
+function stopSession() {
+  fetch('/api/validation/stop', { method: 'POST' }).then(r => r.json()).then(() => {
+    pollStatus(); refreshSessions();
+  });
+}
+
+// ── Sessions ───────────────────────────────────────────────────────────────
+function refreshSessions() {
+  fetch('/api/validation/sessions').then(r => r.json()).then(list => {
+    const sel = document.getElementById('session-sel');
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">— scegli una sessione —</option>' +
+      list.map(s => `<option value="${esc(s.session_id)}">${esc(s.session_id)} · soglia ${s.threshold}</option>`).join('');
+    if (keep) sel.value = keep;
+  });
+}
+refreshSessions();
+
+function loadSession() {
+  stopPlay();
+  sessionId = document.getElementById('session-sel').value || null;
+  detections = []; selectedIdx = -1; curIndex = 0; maxIndex = 0;
+  if (detChart) { detChart.destroy(); detChart = null; }
+  document.getElementById('metrics-out').classList.add('hidden');
+  document.getElementById('metrics-note').textContent = '';
+  document.getElementById('metrics-btn').disabled = !sessionId;
+  document.getElementById('frame-img').removeAttribute('src');
+  if (!sessionId) return;
+  fetch(`/api/validation/${encodeURIComponent(sessionId)}/detections`).then(r => r.json()).then(dets => {
+    detections = dets;
+    cameras = [...new Set(dets.map(d => String(d.camera_id)))].sort();
+    const camSel = document.getElementById('cam-sel');
+    camSel.innerHTML = cameras.map(c => `<option value="${esc(c)}">camera ${esc(c)}</option>`).join('');
+    const ids = [...new Set(dets.map(d => d.predicted_identity))].sort();
+    document.getElementById('filter-id').innerHTML =
+      '<option value="">tutte le identità</option>' + ids.map(i => `<option value="${esc(i)}">${esc(i)}</option>`).join('');
+    buildBulkBar();
+    switchCamera();
+  });
+}
+
+function switchCamera() {
+  stopPlay();
+  curCam = document.getElementById('cam-sel').value || cameras[0];
+  const camDets = detections.filter(d => String(d.camera_id) === String(curCam));
+  maxIndex = camDets.reduce((m, d) => Math.max(m, d.frame_index), 0);
+  document.getElementById('frame-slider').max = maxIndex;
+  document.getElementById('frame-empty').classList.add('hidden');
+  setFrame(0);
+  renderRows();
+}
+
+// ── Frame player ─────────────────────────────────────────────────────────────
+function setFrame(i) {
+  if (!sessionId || curCam == null) return;
+  curIndex = Math.max(0, Math.min(maxIndex, i));
+  document.getElementById('frame-img').src =
+    `/api/validation/${encodeURIComponent(sessionId)}/frame/${encodeURIComponent(curCam)}/${curIndex}`;
+  document.getElementById('frame-slider').value = curIndex;
+  document.getElementById('frame-info').textContent = `frame ${curIndex} / ${maxIndex}`;
+  highlightCurrent();
+}
+function playPause() { playTimer ? stopPlay() : startPlay(); }
+function startPlay() {
+  if (playTimer) return;
+  document.getElementById('play-btn').textContent = '⏸ Pausa';
+  playTimer = setInterval(() => {
+    if (curIndex >= maxIndex) { stopPlay(); return; }
+    setFrame(curIndex + 1);
+  }, 1000 / FPS);
+}
+function stopPlay() {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  document.getElementById('play-btn').textContent = '▶ Play';
+}
+function highlightCurrent() {
+  document.querySelectorAll('#rows tr').forEach(tr =>
+    tr.classList.toggle('cur', Number(tr.dataset.frame) === curIndex));
+}
+
+// ── Detection table + labeling ───────────────────────────────────────────────
+function buildBulkBar() {
+  document.getElementById('bulk-bar').innerHTML =
+    '<span class="text-[11px] text-gray-500 mr-1 self-center">Bulk →</span>' +
+    VERDICTS.map(v =>
+      `<button onclick="bulkApply('${v.key}')" class="px-2 py-0.5 rounded text-[11px] font-medium"
+               style="background:${v.color}22;color:${v.color};border:1px solid ${v.color}55">${v.label}</button>`).join('');
+}
+
+function filteredDetections() {
+  const fid = document.getElementById('filter-id').value;
+  const fst = document.getElementById('filter-status').value;
+  return detections
+    .map((d, i) => ({ d, i }))
+    .filter(({ d }) => String(d.camera_id) === String(curCam))
+    .filter(({ d }) => !fid || d.predicted_identity === fid)
+    .filter(({ d }) => fst === 'all' || (fst === 'labelled' ? !!d.verdict : !d.verdict));
+}
+
+function renderRows() {
+  const rows = filteredDetections();
+  renderedKeys = rows.map(r => r.i);
+  const tbody = document.getElementById('rows');
+  if (!detections.length) { tbody.innerHTML = '<tr><td colspan="5" class="py-3 px-2 text-gray-600">Nessuna detection.</td></tr>'; }
+  else if (!rows.length) { tbody.innerHTML = '<tr><td colspan="5" class="py-3 px-2 text-gray-600">Nessuna riga per il filtro.</td></tr>'; }
+  else {
+    tbody.innerHTML = rows.map(({ d, i }, rowIdx) => {
+      const v = d.verdict ? VMAP[d.verdict] : null;
+      const verdictCell = v
+        ? `<span class="font-medium" style="color:${v.color}">${v.label}</span>`
+        : VERDICTS.map(x => `<button onclick="event.stopPropagation();setVerdict(${i},'${x.key}')" title="${x.label}"
+             class="px-1.5 py-0.5 mr-0.5 rounded text-[10px]" style="background:${x.color}22;color:${x.color}">${x.k}</button>`).join('');
+      return `<tr data-i="${i}" data-frame="${d.frame_index}" onclick="selectRow(${rowIdx})"
+                  class="border-t border-gray-800/50 cursor-pointer ${d.frame_index === curIndex ? 'cur' : ''} ${rowIdx === selectedIdx ? 'sel' : ''}">
+        <td class="py-1 px-2">${d.frame_index}<span class="text-gray-600">.${d.face_id}</span></td>
+        <td class="py-1 px-2">${esc(d.predicted_identity)}</td>
+        <td class="py-1 px-2 text-right">${d.confidence == null ? '—' : (d.confidence*100).toFixed(0)+'%'}</td>
+        <td class="py-1 px-2 text-right">${d.raw_cosine_distance == null ? '—' : d.raw_cosine_distance.toFixed(3)}</td>
+        <td class="py-1 px-2">${verdictCell}</td>
+      </tr>`;
+    }).join('');
+  }
+  const labelled = detections.filter(d => d.verdict).length;
+  document.getElementById('progress').textContent = `${labelled}/${detections.length} etichettate`;
+}
+
+function selectRow(rowIdx) {
+  selectedIdx = rowIdx;
+  const d = detections[renderedKeys[rowIdx]];
+  if (d) setFrame(d.frame_index);
+  document.querySelectorAll('#rows tr').forEach((tr, i) => tr.classList.toggle('sel', i === rowIdx));
+}
+
+function setVerdict(detIdx, verdict) {
+  const d = detections[detIdx];
+  d.verdict = verdict;
+  fetch(`/api/validation/${encodeURIComponent(sessionId)}/labels`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ camera_id: d.camera_id, frame_index: d.frame_index, face_id: d.face_id, verdict }),
+  }).catch(() => {});
+  const unlabelledFilter = document.getElementById('filter-status').value === 'unlabelled';
+  renderRows();
+  if (unlabelledFilter && renderedKeys.length) {
+    selectRow(Math.min(selectedIdx < 0 ? 0 : selectedIdx, renderedKeys.length - 1));
+  } else {
+    highlightCurrent();
+  }
+}
+
+function bulkApply(verdict) {
+  const rows = filteredDetections().filter(({ d }) => !d.verdict);
+  if (!rows.length) return;
+  if (!confirm(`Applicare "${VMAP[verdict].label}" a ${rows.length} righe non etichettate?`)) return;
+  const payload = rows.map(({ d }) => ({ camera_id: d.camera_id, frame_index: d.frame_index, face_id: d.face_id, verdict }));
+  rows.forEach(({ d }) => d.verdict = verdict);
+  fetch(`/api/validation/${encodeURIComponent(sessionId)}/labels`, {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ labels: payload }),
+  }).then(() => renderRows()).catch(() => alert('Errore salvataggio.'));
+}
+
+document.addEventListener('keydown', e => {
+  if (selectedIdx < 0 || /input|select|textarea/i.test(e.target.tagName)) return;
+  const v = VERDICTS.find(x => x.k === e.key);
+  if (v) { e.preventDefault(); setVerdict(renderedKeys[selectedIdx], v.key); }
+});
+
+// ── Metrics + DET curve ──────────────────────────────────────────────────────
+function computeMetrics() {
+  if (!sessionId) return;
+  fetch(`/api/validation/${encodeURIComponent(sessionId)}/metrics`, { method: 'POST' })
+    .then(r => r.json()).then(renderMetrics).catch(() => alert('Errore calcolo metriche.'));
+}
+
+function renderMetrics(m) {
+  const s = m.summary;
+  document.getElementById('metrics-out').classList.remove('hidden');
+  const pct = x => x == null ? '—' : (x*100).toFixed(1) + '%';
+  const cards = [
+    ['TP / FP', `${s.tp} / ${s.fp}`], ['FN / TN', `${s.fn} / ${s.tn}`], ['Scambi', s.scambio],
+    ['TPIR', pct(s.tpir)], ['FAR', pct(s.far)], ['FRR', pct(s.frr)],
+    ['Corretto rifiuto', pct(s.correct_rejection_rate)],
+    ['EER', m.eer == null ? '—' : pct(m.eer)], ['Soglia EER', m.eer_threshold ?? '—'],
+  ];
+  document.getElementById('metrics-cards').innerHTML = cards.map(([k, v]) =>
+    `<div class="bg-gray-900 rounded-xl px-3 py-2">
+       <div class="text-[10px] text-gray-500 uppercase tracking-wide">${k}</div>
+       <div class="text-gray-100 font-semibold">${v}</div>
+     </div>`).join('');
+  document.getElementById('metrics-note').textContent =
+    `${s.labelled_detections}/${s.total_detections} detection etichettate · ` +
+    `${m.genuine_scores} genuini, ${m.impostor_scores} impostori · ` +
+    `esportato metrics.json + threshold_sweep.csv nella cartella sessione.`;
+
+  const curve = m.det_curve || [];
+  if (detChart) detChart.destroy();
+  detChart = new Chart(document.getElementById('det-chart'), {
+    type: 'line',
+    data: {
+      labels: curve.map(p => p.threshold.toFixed(2)),
+      datasets: [
+        { label: 'FAR', data: curve.map(p => p.far), borderColor: '#ef4444', pointRadius: 0, borderWidth: 2 },
+        { label: 'FRR', data: curve.map(p => p.frr), borderColor: '#38bdf8', pointRadius: 0, borderWidth: 2 },
+      ],
+    },
+    options: {
+      animation: false,
+      scales: {
+        x: { title: { display: true, text: 'soglia (cosine distance)', color: '#6b7280' },
+             ticks: { color: '#6b7280', maxTicksLimit: 8, font: { size: 9 } }, grid: { color: 'rgba(75,85,99,.2)' } },
+        y: { min: 0, max: 1, ticks: { color: '#6b7280', font: { size: 9 } }, grid: { color: 'rgba(75,85,99,.2)' } },
+      },
+      plugins: {
+        legend: { labels: { color: '#9ca3af', font: { size: 10 } } },
+        title: { display: m.eer != null, text: m.eer != null ? `EER ≈ ${(m.eer*100).toFixed(1)}% @ soglia ${m.eer_threshold}` : '',
+                 color: '#e5e7eb', font: { size: 11 } },
+      },
+    },
+  });
+}
+</script>
+</body>
+</html>

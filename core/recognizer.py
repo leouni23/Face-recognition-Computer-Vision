@@ -26,20 +26,28 @@ class FaceRecognizer:
         else:
             self._data = None
 
-    def identify(self, embedding: np.ndarray) -> Identity:
+    def match(self, embedding: np.ndarray) -> Optional[Tuple[int, str, float]]:
+        """Nearest template regardless of threshold: (best_person_id, best_name, best_distance).
+
+        Returns None if no templates are loaded. Used by validation logging to record the
+        raw cosine distance + best match even when the subject is ultimately rejected.
+        """
         data = self._data
         if data is None:
-            return None, "Sconosciuto", 0.0
-
+            return None
         matrix, templates = data
         distances = 1.0 - (matrix @ embedding)  # dot = cosine sim (embeddings L2-normalised)
-
         best_idx = int(np.argmin(distances))
-        best_dist = float(distances[best_idx])
-        confidence = float(min(1.0, max(0.0, 1.0 - best_dist)))
+        pid, name, _ = templates[best_idx]
+        return pid, name, float(distances[best_idx])
 
+    def identify(self, embedding: np.ndarray) -> Identity:
+        best = self.match(embedding)
+        if best is None:
+            return None, "Sconosciuto", 0.0
+        pid, name, best_dist = best
+        confidence = float(min(1.0, max(0.0, 1.0 - best_dist)))
         if best_dist < self.threshold:
-            pid, name, _ = templates[best_idx]
             return pid, name, confidence
         return None, "Sconosciuto", confidence
 

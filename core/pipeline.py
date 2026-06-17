@@ -11,6 +11,7 @@ from core.detector import FaceLocation, detect_and_encode
 from core.geometry import project_point, project_polar
 from core.metrics import PerfTracker
 from core.recognizer import FaceRecognizer, Identity
+from core.validation import validation_manager
 from database.repository import CalibrationRepository, PersonRepository
 from database.session import get_session
 
@@ -107,11 +108,14 @@ class FaceIdPipeline:
         self._reload_templates_if_needed()
 
         instrument = _settings.metrics_enabled
+        recording = validation_manager.is_active(camera_id)
         t_start = time.perf_counter()
         timing: Optional[Dict[str, float]] = {} if instrument else None
 
         face_data = detect_and_encode(frame, timing=timing)
         if not face_data:
+            if recording:  # keep the footage continuous even with zero detections
+                validation_manager.record(camera_id, frame, [], [])
             if instrument:
                 self.perf.record(
                     camera_id, detect_ms=timing.get("detect_ms", 0.0),
@@ -120,14 +124,25 @@ class FaceIdPipeline:
                 )
             return []
 
+        threshold = self._recognizer.threshold
         match_ms = 0.0
         results: List[RecognitionResult] = []
+        details: List[dict] = []
         with get_session() as session:
             repo = PersonRepository(session)
             for loc, embedding in face_data:
                 t_m = time.perf_counter()
-                pid, name, conf = self._recognizer.identify(embedding)
+                best = self._recognizer.match(embedding)  # nearest template (pre-threshold)
                 match_ms += (time.perf_counter() - t_m) * 1000.0
+
+                if best is None:
+                    pid, name, conf, raw_dist, best_pid = None, "Sconosciuto", 0.0, None, None
+                else:
+                    best_pid, best_name, best_dist = best
+                    conf = float(min(1.0, max(0.0, 1.0 - best_dist)))
+                    raw_dist = best_dist
+                    pid, name = (best_pid, best_name) if best_dist < threshold else (None, "Sconosciuto")
+
                 if self._should_log(pid):
                     repo.log_event(camera_id, pid, conf)
                     if pid is not None:
@@ -137,8 +152,21 @@ class FaceIdPipeline:
                     if world is not None:
                         world = self._smooth_world(camera_id, pid, world)
                     repo.log_position(camera_id, pid, loc, conf, frame.shape, world=world)
-                results.append((loc, pid, name, conf))
 
+                results.append((loc, pid, name, conf))
+                if recording:
+                    top, right, bottom, left = loc
+                    details.append({
+                        "predicted_identity": name,
+                        "predicted_person_id": pid,
+                        "confidence": round(conf, 4),
+                        "raw_cosine_distance": round(raw_dist, 6) if raw_dist is not None else None,
+                        "best_match_person_id": best_pid if best is not None else None,
+                        "bbox": [int(top), int(right), int(bottom), int(left)],
+                    })
+
+        if recording:
+            validation_manager.record(camera_id, frame, results, details)
         if instrument:
             self.perf.record(
                 camera_id, detect_ms=timing.get("detect_ms", 0.0),
