@@ -59,6 +59,9 @@ def _security_headers(resp: Response) -> Response:
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    # Always revalidate HTML so UI updates are never masked by a stale cached page
+    if resp.mimetype == "text/html":
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
     return resp
 
 # ── Enrollment session (one at a time) ────────────────────────────────────────
@@ -424,6 +427,43 @@ def validation_compute_metrics(session_id: str):
     if d is None:
         return jsonify({"error": "Sessione non trovata"}), 404
     return jsonify(compute_and_export(d))
+
+
+def _persist_env(key: str, value: str) -> bool:
+    """Best-effort: update/insert KEY=value in the project .env so the change survives restart."""
+    env_path = Path(__file__).parent.parent / ".env"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+        out, found = [], False
+        for line in lines:
+            if line.strip().startswith(f"{key}="):
+                out.append(f"{key}={value}"); found = True
+            else:
+                out.append(line)
+        if not found:
+            out.append(f"{key}={value}")
+        env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        return True
+    except Exception as exc:
+        logger.warning(f"Impossibile scrivere .env: {exc}")
+        return False
+
+
+@app.route("/api/settings/match_threshold", methods=["POST"])
+def set_match_threshold():
+    """Apply a recognition threshold live (e.g. the EER point from validation) and persist it."""
+    data = request.get_json(silent=True) or {}
+    try:
+        value = float(data.get("value"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Valore non valido"}), 400
+    if not (0.0 < value < 2.0):
+        return jsonify({"error": "Soglia fuori range (0–2)"}), 400
+    if broadcaster.pipeline is not None:
+        broadcaster.pipeline._recognizer.threshold = value  # live update
+    persisted = _persist_env("MATCH_THRESHOLD", f"{value}")
+    logger.info(f"[Settings] MATCH_THRESHOLD = {value} (persistita nel .env: {persisted})")
+    return jsonify({"value": value, "persisted": persisted})
 
 
 @app.route("/api/validation/<session_id>/video/<camera_id>")

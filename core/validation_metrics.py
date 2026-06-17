@@ -45,17 +45,16 @@ def _read_jsonl(path: Path) -> List[dict]:
     return out
 
 
-def compute_session_metrics(session_dir: Path) -> dict:
-    detections = _read_jsonl(session_dir / "detections.jsonl")
-    labels = {_key(r): r["verdict"] for r in _read_jsonl(session_dir / "labels.jsonl")}
-
+def _metrics_from(detections: List[dict]) -> dict:
+    """Compute counts, rates and the DET/EER from a list of detections that already
+    carry a 'verdict' field (unlabelled ones are ignored)."""
     counts = {v: 0 for v in VERDICTS}
     genuine: List[float] = []
     impostor: List[float] = []
     labelled = 0
 
     for det in detections:
-        verdict = labels.get(_key(det))
+        verdict = det.get("verdict")
         if verdict not in VERDICTS:
             continue
         labelled += 1
@@ -68,13 +67,9 @@ def compute_session_metrics(session_dir: Path) -> dict:
         elif verdict in _IMPOSTOR:
             impostor.append(float(d))
 
-    tp = counts["corretta"]
-    fn = counts["falso_rifiuto"]
-    fp = counts["falsa_accettazione"]
-    tn = counts["sconosciuto_corretto"]
+    tp, fn = counts["corretta"], counts["falso_rifiuto"]
+    fp, tn = counts["falsa_accettazione"], counts["sconosciuto_corretto"]
     swap = counts["scambio"]
-    enrolled_attempts = tp + fn + swap
-    unknown_attempts = fp + tn
 
     def ratio(num, den):
         return round(num / den, 4) if den else None
@@ -84,14 +79,12 @@ def compute_session_metrics(session_dir: Path) -> dict:
         "total_detections": len(detections),
         "counts": counts,
         "tp": tp, "fp": fp, "fn": fn, "tn": tn, "scambio": swap,
-        "tpir": ratio(tp, enrolled_attempts),               # correct identification rate (enrolled)
-        "far": ratio(fp, fp + tn),                          # brief: FP/(FP+TN)
-        "frr": ratio(fn, fn + tp),                          # brief: FN/(FN+TP)
-        "correct_rejection_rate": ratio(tn, unknown_attempts),
+        "tpir": ratio(tp, tp + fn + swap),       # correct identification rate (enrolled)
+        "far": ratio(fp, fp + tn),               # brief: FP/(FP+TN)
+        "frr": ratio(fn, fn + tp),               # brief: FN/(FN+TP)
+        "correct_rejection_rate": ratio(tn, fp + tn),
     }
-
     det_curve, eer, eer_threshold = _det_curve(genuine, impostor)
-
     return {
         "summary": summary,
         "genuine_scores": len(genuine),
@@ -100,6 +93,24 @@ def compute_session_metrics(session_dir: Path) -> dict:
         "eer_threshold": eer_threshold,
         "det_curve": det_curve,
     }
+
+
+def compute_session_metrics(session_dir: Path) -> dict:
+    detections = _read_jsonl(session_dir / "detections.jsonl")
+    labels = {_key(r): r["verdict"] for r in _read_jsonl(session_dir / "labels.jsonl")}
+    for det in detections:
+        det["verdict"] = labels.get(_key(det))
+
+    result = _metrics_from(detections)
+
+    # Per-camera breakdown (only meaningful with more than one camera)
+    cameras = sorted({str(d["camera_id"]) for d in detections})
+    if len(cameras) > 1:
+        result["per_camera"] = {
+            cam: _metrics_from([d for d in detections if str(d["camera_id"]) == cam])
+            for cam in cameras
+        }
+    return result
 
 
 def _det_curve(genuine: List[float], impostor: List[float], steps: int = 201):
