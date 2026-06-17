@@ -1,7 +1,7 @@
 import threading
 import time
-from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from collections import defaultdict, deque
+from typing import Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 from loguru import logger
@@ -10,6 +10,7 @@ from config.settings import get_settings
 from core.detector import FaceLocation, detect_and_encode
 from core.geometry import project_point, project_polar
 from core.metrics import PerfTracker
+from core.notifier import get_notifier
 from core.recognizer import FaceRecognizer, Identity
 from core.validation import validation_manager
 from database.repository import CalibrationRepository, PersonRepository
@@ -25,6 +26,7 @@ class FaceIdPipeline:
     _LOG_COOLDOWN = 10               # seconds between DB event writes per person
     _EMA_ALPHA = 0.4                 # smoothing of map positions (face size is noisy)
     _EMA_RESET_AFTER = 5.0           # seconds without sightings → restart smoothing
+    _UNKNOWN_GRACE = 0.6             # seconds: brief detection gaps don't reset the unknown streak
 
     def __init__(self):
         self._recognizer = FaceRecognizer(threshold=_settings.match_threshold)
@@ -35,6 +37,10 @@ class FaceIdPipeline:
         self._projectors: Dict[str, dict] = {}  # camera_id → {"mode", ...params}
         self._world_ema: Dict[Tuple[str, int], Tuple[float, float, float]] = {}
         self.perf = PerfTracker()  # rolling-window FPS / per-stage latency (read by /api/metrics)
+        self._unknown_buf: Dict[str, Deque[np.ndarray]] = defaultdict(lambda: deque(maxlen=30))
+        self._last_unknown_alert: Dict[str, float] = defaultdict(float)
+        self._unknown_since: Dict[str, float] = {}      # start of the current unknown streak
+        self._unknown_last_seen: Dict[str, float] = {}  # last frame with an unknown (for grace)
 
     def force_reload(self) -> None:
         self._last_reload = 0.0
@@ -89,6 +95,41 @@ class FaceIdPipeline:
         # homography: project the bbox bottom-centre (closest point to the floor plane)
         return project_point(params["H"], (left + right) / 2.0, float(bottom))
 
+    def _update_unknown_alert(
+        self, camera_id: str, unknown_embeddings: List[np.ndarray]
+    ) -> None:
+        """Alert only after a subject has been continuously 'unknown' for >= a minimum
+        duration — so a brief head turn (sub-second) does not trigger a notification.
+
+        The streak resets the moment a frame has no unknown face (e.g. the person turns
+        back and is recognised, or leaves)."""
+        now = time.monotonic()
+        if unknown_embeddings:
+            self._unknown_buf[camera_id].extend(unknown_embeddings)
+            self._unknown_last_seen[camera_id] = now
+            self._unknown_since.setdefault(camera_id, now)
+        else:
+            # reset only after a SUSTAINED absence — a single missed frame (detection
+            # flicker) must not restart the timer, otherwise the alert is delayed for seconds
+            if (camera_id in self._unknown_since
+                    and now - self._unknown_last_seen.get(camera_id, 0.0) > self._UNKNOWN_GRACE):
+                self._unknown_since.pop(camera_id, None)
+                self._unknown_buf[camera_id].clear()
+            return
+
+        started = self._unknown_since[camera_id]
+        if (now - started >= _settings.unknown_alert_min_duration
+                and now - self._last_unknown_alert[camera_id] > _settings.unknown_alert_cooldown):
+            buf = self._unknown_buf[camera_id]
+            if not buf:
+                return
+            mean = np.mean(np.stack(buf), axis=0)
+            self._last_unknown_alert[camera_id] = now
+            buf.clear()
+            threading.Thread(
+                target=get_notifier().alert_unknown, args=(camera_id, mean), daemon=True
+            ).start()
+
     def _smooth_world(
         self, camera_id: str, person_id: int, world: Tuple[float, float]
     ) -> Tuple[float, float]:
@@ -109,11 +150,14 @@ class FaceIdPipeline:
 
         instrument = _settings.metrics_enabled
         recording = validation_manager.is_active(camera_id)
+        notify_unknown = get_notifier().enabled
         t_start = time.perf_counter()
         timing: Optional[Dict[str, float]] = {} if instrument else None
 
         face_data = detect_and_encode(frame, timing=timing)
         if not face_data:
+            if notify_unknown:  # no faces → unknown streak resets
+                self._update_unknown_alert(camera_id, [])
             if recording:  # keep the footage continuous even with zero detections
                 validation_manager.record(camera_id, frame, [], [])
             if instrument:
@@ -128,6 +172,7 @@ class FaceIdPipeline:
         match_ms = 0.0
         results: List[RecognitionResult] = []
         details: List[dict] = []
+        unknown_embeddings: List[np.ndarray] = []
         with get_session() as session:
             repo = PersonRepository(session)
             for loc, embedding in face_data:
@@ -152,6 +197,8 @@ class FaceIdPipeline:
                     if world is not None:
                         world = self._smooth_world(camera_id, pid, world)
                     repo.log_position(camera_id, pid, loc, conf, frame.shape, world=world)
+                elif pid is None and notify_unknown:
+                    unknown_embeddings.append(embedding)
 
                 results.append((loc, pid, name, conf))
                 if recording:
@@ -165,6 +212,8 @@ class FaceIdPipeline:
                         "bbox": [int(top), int(right), int(bottom), int(left)],
                     })
 
+        if notify_unknown:
+            self._update_unknown_alert(camera_id, unknown_embeddings)
         if recording:
             validation_manager.record(camera_id, frame, results, details)
         if instrument:

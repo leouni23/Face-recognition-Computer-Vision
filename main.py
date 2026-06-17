@@ -51,7 +51,12 @@ def _worker(
         if frame is None:
             continue
 
-        results = pipeline.process_frame(frame, cam.camera_id)
+        try:
+            results = pipeline.process_frame(frame, cam.camera_id)
+        except Exception:
+            # A bad frame or transient DB error must never kill the camera worker
+            logger.exception(f"Errore nel frame (camera {cam.camera_id}); continuo")
+            continue
 
         if web_mode:
             broadcaster.push_raw_frame(cam.camera_id, frame)
@@ -117,6 +122,13 @@ def main() -> None:
     cameras = [CameraStream(src).start() for src in _settings.cameras]
     pipeline = FaceIdPipeline()
     broadcaster.pipeline = pipeline
+
+    from core.notifier import build_notifier, set_notifier
+    notifier = build_notifier(_settings)
+    set_notifier(notifier)
+    notifier.start()
+    if notifier.enabled:
+        logger.info("Notifiche Telegram attive (alert soggetti sconosciuti)")
 
     if args.validation is not None:
         from core.validation import validation_manager

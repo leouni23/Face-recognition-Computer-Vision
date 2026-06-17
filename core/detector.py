@@ -58,16 +58,29 @@ def _get_analyzer():
                     allowed_modules=["detection", "recognition"],
                     providers=providers,
                 )
-                instance.prepare(ctx_id=0 if settings.use_gpu else -1, det_size=(640, 640))
-                logger.info("InsightFace: modelli pronti")
+                instance.prepare(
+                    ctx_id=0 if settings.use_gpu else -1,
+                    det_size=(640, 640),
+                    det_thresh=settings.det_threshold,
+                )
+                logger.info(
+                    f"InsightFace: modelli pronti (det_thresh={settings.det_threshold}, "
+                    f"min_face_px={settings.min_face_px})"
+                )
                 _analyzer = instance
     return _analyzer
 
 
 def _faces_to_data(faces) -> List[FaceData]:
+    """Convert InsightFace results to (location, embedding), dropping faces shorter than
+    `min_face_px` — this filters out mirror reflections and distant low-quality faces,
+    the main source of spurious 'unknown' detections."""
+    min_px = get_settings().min_face_px
     results: List[FaceData] = []
     for face in faces:
         x1, y1, x2, y2 = face.bbox.astype(int)
+        if (y2 - y1) < min_px:
+            continue
         location: FaceLocation = (y1, x2, y2, x1)  # → top, right, bottom, left
         results.append((location, face.normed_embedding.astype(np.float32)))
     return results

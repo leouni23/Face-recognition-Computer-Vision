@@ -250,6 +250,11 @@ def delete_person(name: str):
         count = PersonRepository(session).delete_person(name)
     if not count:
         return jsonify({"error": f"Persona '{name}' non trovata"}), 404
+    # Reload templates NOW: otherwise the recognizer keeps the deleted person's
+    # template for up to 60 s and would log events/positions for a person_id that
+    # no longer exists → FOREIGN KEY violation that kills the camera worker.
+    if broadcaster.pipeline is not None:
+        broadcaster.pipeline.force_reload()
     logger.info(f"[API] Dati biometrici di '{name}' eliminati (GDPR Art. 17)")
     return jsonify({"message": f"Persona '{name}' eliminata ({count} record)."})
 
