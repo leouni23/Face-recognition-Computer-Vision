@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Face ID</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <style>
     body { background: #030712; }
     .event-enter { animation: slideIn 0.25s ease; }
@@ -42,6 +43,47 @@
       <div id="camera-grid" class="grid gap-3">
         <div class="bg-gray-900 rounded-2xl aspect-video flex items-center justify-center text-gray-600 text-sm" id="cam-placeholder">
           Caricamento stream...
+        </div>
+      </div>
+
+      <!-- Performance dashboard -->
+      <div class="flex items-center justify-between pt-2">
+        <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Prestazioni</h2>
+        <span id="perf-backend" class="text-[11px] text-gray-600"></span>
+      </div>
+
+      <!-- Resource cards -->
+      <div id="resource-cards" class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm"></div>
+
+      <!-- Per-camera FPS / latency table -->
+      <div class="bg-gray-900 rounded-2xl p-3 overflow-x-auto">
+        <table class="w-full text-xs text-left tabular-nums">
+          <thead class="text-gray-500">
+            <tr>
+              <th class="py-1 pr-3 font-medium">Camera</th>
+              <th class="py-1 px-2 font-medium text-right">FPS</th>
+              <th class="py-1 px-2 font-medium text-right">Detect</th>
+              <th class="py-1 px-2 font-medium text-right">Embed</th>
+              <th class="py-1 px-2 font-medium text-right">Match</th>
+              <th class="py-1 px-2 font-medium text-right">E2E</th>
+              <th class="py-1 pl-2 font-medium text-right">Volti</th>
+            </tr>
+          </thead>
+          <tbody id="perf-tbody" class="text-gray-300">
+            <tr><td colspan="7" class="py-2 text-gray-600">In attesa di dati...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Time-series charts -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="bg-gray-900 rounded-2xl p-3">
+          <div class="text-[11px] text-gray-500 mb-1">FPS aggregata</div>
+          <canvas id="fps-chart" height="120"></canvas>
+        </div>
+        <div class="bg-gray-900 rounded-2xl p-3">
+          <div class="text-[11px] text-gray-500 mb-1">Latenza per-stage (ms)</div>
+          <canvas id="latency-chart" height="120"></canvas>
         </div>
       </div>
     </section>
@@ -527,6 +569,105 @@ function drawMap(people) {
 document.getElementById('map-modal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeMap();
 });
+
+
+// ── Performance dashboard ───────────────────────────────────────────────────
+const MAX_POINTS = 60;
+
+function mkChart(id, datasets) {
+  return new Chart(document.getElementById(id), {
+    type: 'line',
+    data: { labels: [], datasets },
+    options: {
+      responsive: true, animation: false, maintainAspectRatio: true,
+      scales: {
+        x: { display: false },
+        y: { beginAtZero: true, ticks: { color: '#6b7280', font: { size: 9 } },
+             grid: { color: 'rgba(75,85,99,.2)' } },
+      },
+      plugins: { legend: { labels: { color: '#9ca3af', boxWidth: 10, font: { size: 10 } } } },
+      elements: { point: { radius: 0 }, line: { tension: 0.3, borderWidth: 2 } },
+    },
+  });
+}
+
+const fpsChart = mkChart('fps-chart', [
+  { label: 'FPS', data: [], borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,.1)', fill: true },
+]);
+const latChart = mkChart('latency-chart', [
+  { label: 'detect', data: [], borderColor: '#60a5fa' },
+  { label: 'embed',  data: [], borderColor: '#a78bfa' },
+  { label: 'match',  data: [], borderColor: '#fbbf24' },
+  { label: 'E2E',    data: [], borderColor: '#f87171' },
+]);
+
+function pushPoint(chart, values) {
+  chart.data.labels.push('');
+  chart.data.datasets.forEach((ds, i) => ds.data.push(values[i]));
+  if (chart.data.labels.length > MAX_POINTS) {
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(ds => ds.data.shift());
+  }
+  chart.update();
+}
+
+function fmtMetric(v, unit = '') { return v == null ? '—' : `${v}${unit}`; }
+
+function renderResources(r) {
+  document.getElementById('perf-backend').textContent =
+    r.gpu_name ? `${r.gpu_name} · ${r.backend}` : r.backend || '';
+  const cards = [
+    ['GPU', fmtMetric(r.gpu_util_pct, '%')],
+    ['GPU mem', r.gpu_mem_used_mb != null ? `${r.gpu_mem_used_mb}/${r.gpu_mem_total_mb} MB` : '—'],
+    ['GPU temp', fmtMetric(r.gpu_temp_c, '°C')],
+    ['GPU power', fmtMetric(r.gpu_power_w, ' W')],
+    ['CPU', fmtMetric(r.cpu_pct, '%')],
+    ['RAM', r.ram_used_mb != null ? `${(r.ram_used_mb/1000).toFixed(1)}/${(r.ram_total_mb/1000).toFixed(1)} GB` : '—'],
+  ];
+  document.getElementById('resource-cards').innerHTML = cards.map(([k, v]) =>
+    `<div class="bg-gray-900 rounded-xl px-3 py-2">
+       <div class="text-[10px] text-gray-500 uppercase tracking-wide">${k}</div>
+       <div class="text-gray-200 font-semibold tabular-nums">${v}</div>
+     </div>`).join('');
+}
+
+function renderPerfTable(perf) {
+  const cams = perf.cameras || {};
+  const ids = Object.keys(cams).sort();
+  const tbody = document.getElementById('perf-tbody');
+  if (!ids.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="py-2 text-gray-600">Nessun frame elaborato ancora.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = ids.map(id => {
+    const s = cams[id];
+    return `<tr class="border-t border-gray-800/60">
+      <td class="py-1 pr-3">${id}</td>
+      <td class="py-1 px-2 text-right text-emerald-400">${s.fps}</td>
+      <td class="py-1 px-2 text-right">${s.detect_ms}</td>
+      <td class="py-1 px-2 text-right">${s.embed_ms}</td>
+      <td class="py-1 px-2 text-right">${s.match_ms}</td>
+      <td class="py-1 px-2 text-right">${s.total_ms}</td>
+      <td class="py-1 pl-2 text-right">${s.faces}</td>
+    </tr>`;
+  }).join('');
+}
+
+function pollMetrics() {
+  fetch('/api/metrics').then(r => r.json()).then(d => {
+    renderResources(d.resources || {});
+    renderPerfTable(d.perf || {});
+    // aggregate the first camera's latency for the time-series (or zeros)
+    const cams = (d.perf && d.perf.cameras) || {};
+    const first = Object.values(cams)[0];
+    pushPoint(fpsChart, [(d.perf && d.perf.aggregate_fps) || 0]);
+    pushPoint(latChart, first
+      ? [first.detect_ms, first.embed_ms, first.match_ms, first.total_ms]
+      : [0, 0, 0, 0]);
+  }).catch(() => {});
+}
+pollMetrics();
+setInterval(pollMetrics, 1000);
 </script>
 </body>
 </html>

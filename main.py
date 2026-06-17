@@ -86,11 +86,18 @@ def main() -> None:
         help="Host web (default: 127.0.0.1 — usa 0.0.0.0 per esporre sulla LAN, con WEB_PASSWORD impostata)",
     )
     parser.add_argument("--port", type=int, default=8000, help="Porta web (default: 8000)")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Esegui il benchmark prestazioni e termina (report in data/benchmarks/)")
     args = parser.parse_args()
 
     show_local = args.local or not args.web
 
     _setup_logging()
+
+    if args.benchmark:
+        from scripts.benchmark import run_benchmark
+        run_benchmark()
+        return
 
     if args.web and args.host not in ("127.0.0.1", "localhost", "::1") and not _settings.web_password:
         logger.warning(

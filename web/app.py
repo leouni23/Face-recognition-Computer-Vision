@@ -281,6 +281,19 @@ def person_trajectory(person_id: int):
         ])
 
 
+# ── Performance metrics ───────────────────────────────────────────────────────
+
+@app.route("/api/metrics")
+def api_metrics():
+    """FPS (per camera + aggregata), latenza per-stage e risorse GPU/CPU/RAM/power/temp."""
+    from core.metrics import get_resource_metrics
+
+    perf = {"cameras": {}, "aggregate_fps": 0.0}
+    if broadcaster.pipeline is not None:
+        perf = broadcaster.pipeline.perf.snapshot()
+    return jsonify({"perf": perf, "resources": get_resource_metrics()})
+
+
 # ── Floor-plan map + calibration (Phase 2) ────────────────────────────────────
 
 def _map_file() -> "Optional[Path]":
