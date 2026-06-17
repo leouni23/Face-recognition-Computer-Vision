@@ -7,5 +7,10 @@ cryptography>=41.0.0
 pydantic-settings>=2.0.0
 loguru>=0.7.0
 flask>=3.0.0
+psutil>=5.9.0
+# GPU resource metrics on x86+NVIDIA (no-op altrove; su Jetson si usa tegrastats)
+nvidia-ml-py>=12.535.0
+# Telegram bot (alert soggetti sconosciuti + enrollment) — disattivabile da .env
+pyTelegramBotAPI>=4.14.0
 # PostgreSQL only — omit if using SQLite
 psycopg2-binary>=2.9.0

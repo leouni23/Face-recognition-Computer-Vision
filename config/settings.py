@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     web_password: str = ""  # Basic Auth per la Web UI; vuota = nessuna autenticazione (solo localhost!)
     data_retention_days: int = 365
     position_log_interval: float = 1.0  # seconds between saved position points per person/camera
+    metrics_enabled: bool = True  # pipeline timing instrumentation (overhead trascurabile)
+    data_dir: str = "data"  # base dir per artefatti persistenti (DB, validation, benchmark, log)
     log_level: str = "INFO"
 
     @property

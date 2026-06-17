@@ -9,6 +9,7 @@ from loguru import logger
 from config.settings import get_settings
 from core.detector import FaceLocation, detect_and_encode
 from core.geometry import project_point, project_polar
+from core.metrics import PerfTracker
 from core.recognizer import FaceRecognizer, Identity
 from database.repository import CalibrationRepository, PersonRepository
 from database.session import get_session
@@ -32,6 +33,7 @@ class FaceIdPipeline:
         self._last_position: Dict[Tuple[str, int], float] = defaultdict(float)
         self._projectors: Dict[str, dict] = {}  # camera_id → {"mode", ...params}
         self._world_ema: Dict[Tuple[str, int], Tuple[float, float, float]] = {}
+        self.perf = PerfTracker()  # rolling-window FPS / per-stage latency (read by /api/metrics)
 
     def force_reload(self) -> None:
         self._last_reload = 0.0
@@ -104,15 +106,28 @@ class FaceIdPipeline:
     ) -> List[RecognitionResult]:
         self._reload_templates_if_needed()
 
-        face_data = detect_and_encode(frame)
+        instrument = _settings.metrics_enabled
+        t_start = time.perf_counter()
+        timing: Optional[Dict[str, float]] = {} if instrument else None
+
+        face_data = detect_and_encode(frame, timing=timing)
         if not face_data:
+            if instrument:
+                self.perf.record(
+                    camera_id, detect_ms=timing.get("detect_ms", 0.0),
+                    embed_ms=timing.get("embed_ms", 0.0), match_ms=0.0,
+                    total_ms=(time.perf_counter() - t_start) * 1000.0, faces=0,
+                )
             return []
 
+        match_ms = 0.0
         results: List[RecognitionResult] = []
         with get_session() as session:
             repo = PersonRepository(session)
             for loc, embedding in face_data:
+                t_m = time.perf_counter()
                 pid, name, conf = self._recognizer.identify(embedding)
+                match_ms += (time.perf_counter() - t_m) * 1000.0
                 if self._should_log(pid):
                     repo.log_event(camera_id, pid, conf)
                     if pid is not None:
@@ -123,5 +138,12 @@ class FaceIdPipeline:
                         world = self._smooth_world(camera_id, pid, world)
                     repo.log_position(camera_id, pid, loc, conf, frame.shape, world=world)
                 results.append((loc, pid, name, conf))
+
+        if instrument:
+            self.perf.record(
+                camera_id, detect_ms=timing.get("detect_ms", 0.0),
+                embed_ms=timing.get("embed_ms", 0.0), match_ms=match_ms,
+                total_ms=(time.perf_counter() - t_start) * 1000.0, faces=len(face_data),
+            )
 
         return results
