@@ -1,0 +1,33 @@
+# Version control / IDE
+.git
+.gitignore
+.idea
+.vscode
+*.swp
+
+# Python caches & envs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Secrets & local config (set via compose env / -e instead)
+.env
+*.env
+
+# Runtime artifacts (mounted as the /data volume, never baked into the image)
+data/
+*.db
+*.sqlite3
+*.log
+
+# User-uploaded floor plans (may depict real environments)
+web/static/maps/
+
+# Docs images not needed at runtime
+docs/
+
+# OS
+.DS_Store

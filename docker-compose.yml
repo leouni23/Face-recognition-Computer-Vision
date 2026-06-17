@@ -1,0 +1,51 @@
+# Face ID — x86-64 + NVIDIA CUDA deployment.
+#
+#   BIOMETRIC_SECRET_KEY=<hex> docker compose up --build
+#
+# Requires Docker + NVIDIA Container Toolkit on an x86 Linux host (or Windows
+# Docker Desktop + WSL2 + the toolkit). GPU passthrough has negligible overhead,
+# so CUDA acceleration in the container performs like a native install.
+#
+# For Jetson (ARM64) build and run ON THE DEVICE — see the Dockerfile header and
+# the README; the L4T base images and --runtime nvidia are device-specific.
+
+services:
+  faceid:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: nvidia/cuda:12.4.1-runtime-ubuntu22.04
+        ONNXRUNTIME_PIP: onnxruntime-gpu
+        INSTALL_OPENCV: "1"
+    image: faceid:x86-cuda
+    container_name: faceid
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # REQUIRED — generate once: python -c "import secrets; print(secrets.token_hex(32))"
+      BIOMETRIC_SECRET_KEY: ${BIOMETRIC_SECRET_KEY:?set BIOMETRIC_SECRET_KEY in your shell or a .env file}
+      # Required when the UI is reachable beyond this host (it binds 0.0.0.0)
+      WEB_PASSWORD: ${WEB_PASSWORD:-}
+      DATABASE_URL: sqlite:////data/face_id.db
+      DATA_DIR: /data
+      CAMERA_SOURCES: ${CAMERA_SOURCES:-0}
+      USE_GPU: "true"
+      MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.5}
+    volumes:
+      - faceid-data:/data                         # DB, validation, benchmark, logs
+      - faceid-models:/home/faceid/.insightface   # ~200 MB models, downloaded once
+    # Local USB webcam: uncomment to pass it through (Linux host). For RTSP, leave commented.
+    # devices:
+    #   - "/dev/video0:/dev/video0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  faceid-data:
+  faceid-models:
