@@ -13,9 +13,14 @@
     tr.sel { outline:2px solid #38bdf8; outline-offset:-2px; }
     tr.cur { background:rgba(56,189,248,.10); }
     input[type=range] { accent-color:#38bdf8; height:6px; }
-    .ctrl { padding:.5rem .75rem; border-radius:.6rem; background:#1f2937; }
-    .ctrl:hover { background:#374151; }
-    kbd { background:#374151; border-radius:4px; padding:0 5px; font-size:11px; }
+    kbd { background:#374151; border-radius:4px; padding:1px 6px; font-size:11px; border:1px solid #4b5563; }
+
+    /* player controls */
+    .ctrl { display:inline-flex; align-items:center; justify-content:center; gap:.35rem; min-width:2.5rem;
+            padding:.5rem .85rem; border-radius:.7rem; background:#1f2937; border:1px solid #374151;
+            font-weight:600; color:#e5e7eb; transition:all .12s; cursor:pointer; }
+    .ctrl:hover { background:#374151; border-color:#4b5563; }
+    .ctrl:active { transform:translateY(1px); }
   </style>
 </head>
 <body class="text-gray-100 min-h-screen">

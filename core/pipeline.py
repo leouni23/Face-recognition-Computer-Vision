@@ -41,6 +41,7 @@ class FaceIdPipeline:
         self._last_unknown_alert: Dict[str, float] = defaultdict(float)
         self._unknown_since: Dict[str, float] = {}      # start of the current unknown streak
         self._unknown_last_seen: Dict[str, float] = {}  # last frame with an unknown (for grace)
+        self._start_monotonic = time.monotonic()        # for the startup warm-up window
 
     def force_reload(self) -> None:
         self._last_reload = 0.0
@@ -118,7 +119,8 @@ class FaceIdPipeline:
             return
 
         started = self._unknown_since[camera_id]
-        if (now - started >= _settings.unknown_alert_min_duration
+        if (now - self._start_monotonic >= _settings.unknown_alert_warmup   # skip startup warm-up
+                and now - started >= _settings.unknown_alert_min_duration
                 and now - self._last_unknown_alert[camera_id] > _settings.unknown_alert_cooldown):
             buf = self._unknown_buf[camera_id]
             if not buf:

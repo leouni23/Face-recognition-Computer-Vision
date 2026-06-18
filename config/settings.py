@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     unknown_alert_cooldown: float = 10.0      # secondi minimi tra un alert e il successivo per camera
     unknown_alert_min_duration: float = 1.0   # secondi di "sconosciuto" CONTINUO prima di allertare
+    unknown_alert_warmup: float = 15.0        # nessun alert nei primi N secondi (warm-up camera)
     unknown_alert_min_samples: int = 3        # (legacy) non più usato per il gate
     log_level: str = "INFO"
 
