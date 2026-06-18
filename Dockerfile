@@ -12,8 +12,8 @@
 #   x86-64 + CUDA 12:
 #     docker build -t faceid:x86-cuda .
 #
-#   Jetson (ARM64, L4T) — BUILD SUL DEVICE: usa un base jetson-containers che include già
-#   onnxruntime per L4T e passa --build-arg ONNXRUNTIME_PIP="" (vedi README).
+#   Jetson (ARM64 / L4T, TX2 e Orin): NON usare questo Dockerfile — vedi Dockerfile.jetson
+#   (parte da una base jetson-containers con onnxruntime già compilato per L4T) e il README.
 
 ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 

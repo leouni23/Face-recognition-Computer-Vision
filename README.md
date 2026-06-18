@@ -81,52 +81,76 @@ Apri **[http://localhost:8000](http://localhost:8000)** → **"Inizia registrazi
 
 ### 🐧 Linux x86-64 + NVIDIA — Docker
 
-Con il **NVIDIA Container Toolkit** la GPU passa al container con overhead trascurabile: l'accelerazione CUDA rende come in nativo.
+Con il **NVIDIA Container Toolkit** la GPU passa al container con overhead trascurabile: l'accelerazione CUDA (cuDNN incluso) rende come in nativo — **verificato** con inferenza reale su GPU.
 
 **Prerequisiti:** Docker + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Su Windows è possibile anche via Docker Desktop + WSL2 + toolkit.
+
+**Opzione A — immagine pronta (la più rapida, nessuna build):**
+
+```bash
+docker run --gpus all -p 8000:8000 \
+  -e BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
+  -v faceid-data:/data -v faceid-models:/home/faceid/.insightface \
+  --device /dev/video0 t018/faceid:x86-cuda
+```
+
+L'immagine è su Docker Hub: **[hub.docker.com/r/t018/faceid](https://hub.docker.com/r/t018/faceid)**.
+
+**Opzione B — build con docker compose** (dal sorgente):
 
 ```bash
 git clone https://github.com/leouni23/Face-recognition-Computer-Vision.git
 cd Face-recognition-Computer-Vision
-
-# Avvia (l'immagine x86 CUDA viene costruita al primo run)
 BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
   docker compose up --build
 ```
 
-La Web UI è su **[http://localhost:8000](http://localhost:8000)**. DB SQLite, modelli InsightFace e dati persistono in due volumi (`faceid-data`, `faceid-models`).
-
-> 📦 **Immagine già pronta** (no build): `docker pull t018/faceid:x86-cuda` — [hub.docker.com/r/t018/faceid](https://hub.docker.com/r/t018/faceid). Validata: con `--gpus all` usa l'accelerazione CUDA (cuDNN incluso). Per una **webcam USB** locale scommenta `devices: ["/dev/video0:/dev/video0"]` in `docker-compose.yml`; per **RTSP** imposta `CAMERA_SOURCES`. Esponendo oltre il proprio host, imposta `WEB_PASSWORD`.
+La Web UI è su **[http://localhost:8000](http://localhost:8000)**. DB SQLite, modelli InsightFace e dati persistono nei volumi `faceid-data` / `faceid-models`. Per una **webcam USB** usa `--device /dev/video0` (o scommentalo in `docker-compose.yml`); per **RTSP** imposta `CAMERA_SOURCES`; esponendo oltre il proprio host imposta `WEB_PASSWORD`.
 
 ---
 
 ### 🤖 Jetson TX2 / Orin Nano — Docker (build **sul device**)
 
-> ⚠️ Le immagini ARM64 si basano sui base image **NVIDIA L4T**, legati al driver Tegra dell'host montato a runtime: vanno **costruite ed eseguite sul Jetson**. Il cross-build su x86 (buildx/QEMU) produce l'immagine ma **non può eseguire né validare il codice GPU**.
+> ⚠️ **Si costruisce ed esegue SUL Jetson.** Le immagini ARM64 dipendono dalle librerie L4T/CUDA del device (montate a runtime con `--runtime nvidia`). Il cross-build su x86 (buildx/QEMU) **non** produce un'immagine funzionante. Su Jetson si usa **[`Dockerfile.jetson`](Dockerfile.jetson)**, che parte da una base **[jetson-containers](https://github.com/dusty-nv/jetson-containers)** (`dustynv/onnxruntime:<L4T>`) con CUDA + cuDNN + onnxruntime + OpenCV **già compilati per la tua L4T** — i wheel pip `onnxruntime-gpu`/`opencv-python` x86 **non** funzionano su Jetson.
+
+**1 · Verifica la tua versione L4T** sul device:
+
+```bash
+cat /etc/nv_tegra_release      # es. "R32 (release), REVISION: 7.1" → L4T r32.7  (TX2, JetPack 4.6)
+                               #     "R36 (release), REVISION: 2.0" → L4T r36.2  (Orin,  JetPack 6)
+```
+
+**2 · Abilita il runtime NVIDIA per Docker** (una volta sola): in `/etc/docker/daemon.json` imposta `"default-runtime": "nvidia"` e `sudo systemctl restart docker`.
+
+**3 · Builda ed esegui** (scegli il tag base in base alla tua L4T):
 
 ```bash
 git clone https://github.com/leouni23/Face-recognition-Computer-Vision.git
 cd Face-recognition-Computer-Vision
 
-# --- Orin Nano (L4T r36, CUDA 12) ---
-docker build -t faceid:orin \
-  --build-arg BASE_IMAGE=nvcr.io/nvidia/l4t-base:r36.2.0 \
-  --build-arg ONNXRUNTIME_PIP="" --build-arg INSTALL_OPENCV=0 .
+# --- Jetson TX2  (JetPack 4.6 / L4T r32.7, CUDA 10.2) ---
+sudo docker build -f Dockerfile.jetson -t faceid:jetson-tx2 \
+  --build-arg BASE_IMAGE=dustynv/onnxruntime:r32.7.1 .
 
-# --- Jetson TX2 (L4T r32.7, CUDA 10.2) ---
-docker build -t faceid:tx2 \
-  --build-arg BASE_IMAGE=nvcr.io/nvidia/l4t-base:r32.7.1 \
-  --build-arg ONNXRUNTIME_PIP="" --build-arg INSTALL_OPENCV=0 .
+# --- Jetson Orin (JetPack 6 / L4T r36, CUDA 12) ---
+sudo docker build -f Dockerfile.jetson -t faceid:jetson-orin \
+  --build-arg BASE_IMAGE=dustynv/onnxruntime:r36.2.0 .
 
-# Avvio (sostituisci il tag con la tua immagine)
-docker run --runtime nvidia -p 8000:8000 \
+# Avvio (sostituisci il tag con quello che hai buildato)
+sudo docker run --runtime nvidia -p 8000:8000 \
   -e BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
-  -e DATABASE_URL=sqlite:////data/face_id.db \
-  -v faceid-data:/data -v faceid-models:/home/faceid/.insightface \
-  --device /dev/video0 faceid:orin
+  -v faceid-data:/data -v faceid-models:/root/.insightface \
+  --device /dev/video0 faceid:jetson-tx2
 ```
 
-Su Jetson, ONNX Runtime e OpenCV provengono dal base image L4T / [jetson-containers](https://github.com/dusty-nv/jetson-containers) (i wheel pip non sono compilati per L4T) — da qui `ONNXRUNTIME_PIP=""` e `INSTALL_OPENCV=0`.
+💡 **Trovare il tag base giusto:** se i tag sopra non combaciano con la tua L4T, installa `jetson-containers` e lascia che lo trovi lui, poi passa quel tag a `--build-arg BASE_IMAGE=...`:
+
+```bash
+git clone https://github.com/dusty-nv/jetson-containers && bash jetson-containers/install.sh
+jetson-containers run --autotag onnxruntime   # individua l'immagine onnxruntime compatibile con la tua L4T
+```
+
+> ℹ️ **Nota TX2 (L4T r32.7, Python 3.6):** lo stack scientifico richiesto da InsightFace (scikit-image, scipy) su Python 3.6 ARM può richiedere build lunghe. Se `pip` fallisce su una dipendenza, parti da una base jetson-containers più completa (es. `dustynv/l4t-ml:r32.7.1`, che include già numpy/scipy/scikit) passandola come `BASE_IMAGE`. Le immagini Jetson vanno comunque verificate sul device.
 
 ---
 

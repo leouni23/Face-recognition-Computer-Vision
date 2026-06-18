@@ -540,19 +540,20 @@ La pipeline accumula gli embedding sconosciuti in un buffer per camera e invia l
 
 ## 13. Containerizzazione
 
-Un **unico `Dockerfile` parametrico** (`ARG BASE_IMAGE` / `ONNXRUNTIME_PIP` / `INSTALL_OPENCV`): il layer applicativo è identico su tutti i target, cambia solo il base image e il runtime ONNX/OpenCV.
+Due Dockerfile, perché x86 e Jetson hanno esigenze opposte sul fronte CUDA/ONNX:
 
-| Target | Base image | ONNX/OpenCV | Esecuzione |
-| --- | --- | --- | --- |
-| x86-64 + CUDA 12 (RTX) | `nvidia/cuda:12.x-runtime` | `onnxruntime-gpu` via pip | `--gpus all` / `docker compose` |
-| Jetson Orin Nano (L4T r36) | `l4t-base:r36.x` | dal base L4T (pip vuoto) | `--runtime nvidia` |
-| Jetson TX2 (L4T r32.7) | `l4t-base:r32.7.1` | dal base L4T (pip vuoto) | `--runtime nvidia` |
+| Target | File | Base | CUDA/cuDNN + onnxruntime | Esecuzione |
+| --- | --- | --- | --- | --- |
+| x86-64 + CUDA 12 (RTX) | `Dockerfile` | `nvidia/cuda:12.4.1-cudnn-runtime` | dal base (CUDA+cuDNN) + `onnxruntime-gpu` pip; **multi-stage** | `--gpus all` / `docker compose` |
+| Jetson Orin (L4T r36) | `Dockerfile.jetson` | `dustynv/onnxruntime:r36.x` | già nel base jetson-containers | `--runtime nvidia` |
+| Jetson TX2 (L4T r32.7) | `Dockerfile.jetson` | `dustynv/onnxruntime:r32.7.1` | già nel base jetson-containers | `--runtime nvidia` |
 
-- **`docker-compose.yml`** (x86): servizio con riserva GPU NVIDIA e due **volumi persistenti** — `faceid-data` (`/data`: DB SQLite, validation, benchmark, log) e `faceid-models` (`~/.insightface`: ~200 MB scaricati una volta). Utente non-root, healthcheck su `/api/cameras`.
-- **Vincolo ARM:** le immagini Jetson vanno **costruite ed eseguite sul device** (i base L4T dipendono dal driver Tegra dell'host); il cross-build su x86 con QEMU produce l'immagine ma non può validare il codice GPU.
+- **x86 (`Dockerfile`, multi-stage):** stage `builder` con build-tools compila le dipendenze in un venv; lo stage finale copia solo il venv → niente build-tools nell'immagine. Il base **`cudnn-runtime`** è scelto perché il provider CUDA di onnxruntime si linka a *tutte* le librerie CUDA + cuDNN (un base senza cuDNN fa ripiegare silenziosamente su CPU). Immagine validata con inferenza GPU reale; pubblicata come **`t018/faceid:x86-cuda`** su Docker Hub. Compose con riserva GPU NVIDIA e volumi `faceid-data` (`/data`) e `faceid-models` (`~/.insightface`).
+- **Jetson (`Dockerfile.jetson`):** parte da una base **jetson-containers** (`dustynv/onnxruntime:<L4T>`) che fornisce CUDA+cuDNN+onnxruntime+OpenCV compilati per la L4T del device (i wheel pip x86 non valgono su ARM/L4T); aggiunge solo app + dipendenze pure-Python. Va **costruito ed eseguito sul device** (`--runtime nvidia`). Per TX2 (Python 3.6) lo stack scientifico può richiedere una base più completa (`dustynv/l4t-ml`).
+- **Multi-arch index:** `scripts/publish_manifest.sh` combina i tag per-arch già pushati in un image index (`docker buildx imagetools create`) → `docker pull t018/faceid` sceglie amd64 (PC) o arm64 (Orin) in automatico. Il TX2, anch'esso `linux/arm64`, non condivide lo slot con l'Orin: resta tag esplicito (`t018/faceid:jetson-tx2`).
 - **Windows:** resta **installazione nativa** (massime prestazioni CUDA), non containerizzata.
 
-I comandi build/run per ogni target sono nel [README](README.md#-installazione) e nell'header del `Dockerfile`.
+I comandi build/run per ogni target sono nel [README](README.md#-installazione) e negli header di `Dockerfile` / `Dockerfile.jetson`.
 
 ---
 

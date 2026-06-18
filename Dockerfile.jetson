@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1
+#
+# Face ID — Jetson (ARM64 / L4T). DA COSTRUIRE ED ESEGUIRE SUL DEVICE.
+#
+# Si parte da un'immagine jetson-containers (dusty-nv) che include GIÀ, compilati per la
+# tua L4T, CUDA + cuDNN + onnxruntime (GPU) + numpy + OpenCV. Qui aggiungiamo solo il
+# codice app e le dipendenze pure-Python mancanti (Flask, SQLAlchemy, InsightFace, …).
+# onnxruntime/opencv/numpy NON vengono reinstallati: si usano quelli del base (le uniche
+# build ARM/L4T che funzionano davvero su Jetson — i wheel pip x86 non valgono).
+#
+#   Jetson TX2  (JetPack 4.6 / L4T r32.7, CUDA 10.2, Python 3.6):
+#     docker build -f Dockerfile.jetson -t faceid:jetson-tx2 \
+#       --build-arg BASE_IMAGE=dustynv/onnxruntime:r32.7.1 .
+#
+#   Jetson Orin (JetPack 6 / L4T r36, CUDA 12, Python 3.10):
+#     docker build -f Dockerfile.jetson -t faceid:jetson-orin \
+#       --build-arg BASE_IMAGE=dustynv/onnxruntime:r36.2.0 .
+#
+#   Esecuzione (sul device, runtime NVIDIA):
+#     docker run --runtime nvidia -p 8000:8000 \
+#       -e BIOMETRIC_SECRET_KEY=<hex> -e DATABASE_URL=sqlite:////data/face_id.db \
+#       -v faceid-data:/data -v faceid-models:/root/.insightface \
+#       --device /dev/video0 faceid:jetson-tx2
+#
+# Suggerimento: `jetson-containers run --autotag onnxruntime` individua il tag base
+# compatibile con la L4T installata; vedi README per la procedura completa.
+
+ARG BASE_IMAGE=dustynv/onnxruntime:r36.2.0
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+
+# FFMPEG (RTSP) + librerie OpenCV runtime + curl (healthcheck). build-essential per le
+# eventuali estensioni che pip deve compilare su ARM (InsightFace/Cython).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg libgl1 libglib2.0-0 curl python3-pip build-essential python3-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Installa SOLO le dipendenze non già fornite dal base jetson-containers.
+# Escludi onnxruntime / opencv-python / numpy / psycopg2 (dal base o non necessari su SQLite).
+COPY requirements.txt .
+RUN python3 -m pip install --upgrade pip && \
+    grep -vE '^(onnxruntime|opencv-python|numpy|psycopg2)' requirements.txt > /tmp/req.txt && \
+    python3 -m pip install -r /tmp/req.txt
+
+COPY . .
+
+# Cache modelli InsightFace nella home di root (l'utente del base è root)
+ENV DATA_DIR=/data \
+    DATABASE_URL=sqlite:////data/face_id.db \
+    USE_GPU=true \
+    LOG_LEVEL=INFO
+RUN mkdir -p /data /root/.insightface
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD curl -fsS http://localhost:8000/api/cameras || exit 1
+
+CMD ["python3", "main.py", "--web", "--host", "0.0.0.0"]
