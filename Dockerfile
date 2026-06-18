@@ -34,9 +34,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# System libs: OpenCV runtime (libGL/glib), FFMPEG for RTSP, python, curl for healthcheck
+# System libs: OpenCV runtime (libGL/glib), FFMPEG for RTSP, python, curl for healthcheck.
+# build-essential + python3-dev: InsightFace compiles a small Cython extension on install.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ${PYTHON} ${PYTHON}-pip \
+        ${PYTHON} ${PYTHON}-pip ${PYTHON}-dev build-essential \
         ffmpeg libgl1 libglib2.0-0 curl tzdata \
  && rm -rf /var/lib/apt/lists/*
 
