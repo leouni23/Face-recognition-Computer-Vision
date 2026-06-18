@@ -13,10 +13,7 @@ services:
   faceid:
     build:
       context: .
-      args:
-        BASE_IMAGE: nvidia/cuda:12.4.1-runtime-ubuntu22.04
-        ONNXRUNTIME_PIP: onnxruntime-gpu
-        INSTALL_OPENCV: "1"
+      # Default del Dockerfile: base Python slim + CUDA/cuDNN via pip (multi-stage).
     image: faceid:x86-cuda
     container_name: faceid
     restart: unless-stopped
