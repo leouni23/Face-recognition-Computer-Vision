@@ -11,7 +11,11 @@
 7. [Stack Tecnologico](#7-stack-tecnologico)
 8. [Conformità GDPR](#8-conformità-gdpr)
 9. [Configurazione e Deploy](#9-configurazione-e-deploy)
-10. [Argomenti da Studiare per la Presentazione](#10-argomenti-da-studiare-per-la-presentazione)
+10. [Strumentazione delle Prestazioni](#10-strumentazione-delle-prestazioni)
+11. [Modalità di Validazione (esperimenti)](#11-modalità-di-validazione-esperimenti)
+12. [Bot Telegram](#12-bot-telegram)
+13. [Containerizzazione](#13-containerizzazione)
+14. [Argomenti da Studiare per la Presentazione](#14-argomenti-da-studiare-per-la-presentazione)
 
 ---
 
@@ -439,9 +443,18 @@ I dati biometrici (embedding facciali) rientrano nella **categoria speciale** ai
 | `WEB_PASSWORD` | *(vuota)* | Basic Auth Web UI — obbligatoria se esposta oltre localhost |
 | `CAMERA_SOURCES` | `0` | Indici/URL camere separati da virgola (es. `0,1` o `rtsp://...`) |
 | `MATCH_THRESHOLD` | `0.5` | Soglia cosine distance (più basso = più severo) |
+| `DET_THRESHOLD` | `0.5` | Confidenza minima del rilevatore SCRFD (più alto = meno falsi rilevamenti) |
+| `MIN_FACE_PX` | `80` | Scarta volti più bassi di N px (riflessi specchio, volti lontani) |
 | `USE_GPU` | `true` | Usa CUDA se disponibile |
 | `POSITION_LOG_INTERVAL` | `1.0` | Secondi tra i punti di posizione salvati (per persona/camera) |
 | `DATA_RETENTION_DAYS` | `365` | Giorni di conservazione dati biometrici |
+| `DATA_DIR` | `data` | Base per artefatti persistenti (DB, validation, benchmark, log) — `/data` in Docker |
+| `METRICS_ENABLED` | `true` | Strumentazione timing della pipeline (vedi §11) |
+| `TELEGRAM_ENABLED` | `false` | Abilita gli alert Telegram (vedi §13) |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | — | Credenziali bot (da @BotFather / @userinfobot) |
+| `UNKNOWN_ALERT_COOLDOWN` | `10.0` | Secondi minimi tra un alert sconosciuto e il successivo |
+| `UNKNOWN_ALERT_MIN_DURATION` | `1.0` | Secondi di "sconosciuto" continuo prima di allertare |
+| `UNKNOWN_ALERT_WARMUP` | `15.0` | Nessun alert nei primi N secondi (warm-up camera all'avvio) |
 | `LOG_LEVEL` | `INFO` | Verbosità log (DEBUG/INFO/WARNING/ERROR) |
 
 ### Avvio
@@ -468,7 +481,82 @@ python scripts/delete_person.py --name "Nome Cognome"
 
 ---
 
-## 10. Argomenti da Studiare per la Presentazione
+## 10. Strumentazione delle Prestazioni
+
+Strumentazione integrata per misurare FPS, latenza e uso risorse, visibile live nella dashboard. Disattivabile con `METRICS_ENABLED=false` (overhead trascurabile).
+
+**`core/metrics.py`:**
+
+- **`PerfTracker`** — finestra mobile (ultimi 60 frame) per camera: calcola FPS smussato e latenza media per stage. Thread-safe.
+- **Provider risorse cross-platform** — sceglie il backend a runtime: **NVML** (`pynvml`) su x86+NVIDIA, **`tegrastats`** su Jetson (L4T), **`psutil`** come fallback. Restituisce GPU util/memoria/potenza/temperatura, CPU%, RAM; ogni campo degrada a `None` se non disponibile.
+
+**Timing (`detector.py` + `pipeline.py`):** `detect_and_encode(timing=...)` separa il tempo di **detection** da quello di **embedding** (replicando `FaceAnalysis.get()`, con fallback difensivo). La pipeline misura detection/embedding/matching/end-to-end e il numero di volti per frame.
+
+**Matcher ottimizzato (`recognizer.py`):** la matrice `(N×512)` dei template è precalcolata in `load()` e scambiata atomicamente — niente `np.stack` per frame. `benchmark_matching()` misura la latenza di `identify()` al variare della dimensione del DB (10…5000 template): resta sotto il millisecondo anche con migliaia di iscritti.
+
+**Dashboard e API:**
+
+- `GET /api/metrics` → JSON con FPS (per camera + aggregata), latenza per-stage e risorse.
+- Pannello **Prestazioni** in `index.html`: card risorse, tabella per-camera, due grafici time-series (Chart.js) per FPS e latenza, polling 1s.
+- **`scripts/benchmark.py`** (o `python main.py --benchmark`): carico controllato → report machine-readable in `data/benchmarks/<run_id>/` (`report.json` + `matching.csv`), etichettato con piattaforma e backend così gli stessi scenari sono confrontabili tra i target hardware (x86 CUDA, Jetson TX2, Orin).
+
+---
+
+## 11. Modalità di Validazione (esperimenti)
+
+Strumento per **misurare l'accuratezza** del riconoscimento fornendo la ground truth *a posteriori*, rivedendo il filmato: il sistema da solo non può sapere se un'identificazione è corretta.
+
+> ⚠️ **Privacy:** è l'unica funzione che salva **immagini** (video annotato), deroga consapevole al design senza-immagini. Gli artefatti stanno sotto `data/validation/<id>/`, **fuori dal DB biometrico** e **mai versionati su git** (`data/` è in `.gitignore`). `scripts/clear_validation.py` li elimina dopo l'analisi.
+
+**Registrazione (`core/validation.py` → `ValidationManager`):** una sessione nominata produce, per camera, il **video annotato** (mp4) + **`detections.jsonl`** (un record per volto per frame, con `raw_cosine_distance` e `best_match_person_id` per lo sweep offline) + `session.json`. La pipeline registra ogni frame mentre la sessione è attiva (anche senza volti). Avvio/stop da UI o `python main.py --validation [NOME]`.
+
+**Review UI (`/validation`):**
+
+- **Player a frame**: i frame JPEG sono estratti dall'mp4 on-demand (`/api/validation/<id>/frame/<cam>/<index>`) — evita il problema di codec (gli mp4 `mp4v` non sono riproducibili in `<video>`) e dà sync esatto col log. Navigazione con frecce, slider, salta-al-volto.
+- **Labeling**: 5 verdetti — `corretta` (TP), `falso_rifiuto` (FN), `falsa_accettazione` (FP, errore critico), `scambio`, `sconosciuto_corretto` (TN) — sia frame-by-frame (barra sotto il video) sia in **bulk** per identità; salvati in `labels.jsonl`.
+
+**Metriche (`core/validation_metrics.py`):** conteggi TP/FP/FN/TN + scambi, TPIR, `FAR = FP/(FP+TN)`, `FRR = FN/(FN+TP)`, tasso di corretto rifiuto. Lo **sweep della soglia** sulle distribuzioni genuini/impostori produce la **curva DET** e l'**EER** con la soglia operativa; export in `metrics.json` + `threshold_sweep.csv`. Con più camere, anche il breakdown **per-camera**. Tutto riproducibile dai JSONL senza rieseguire le camere.
+
+**Come migliora davvero la precisione:** la rete ArcFace è **pre-addestrata e congelata** (non si ri-addestra). Ma il risultato della validazione si applica al sistema: il bottone **"Applica soglia EER"** (`POST /api/settings/match_threshold`) imposta la `MATCH_THRESHOLD` ottimale **a caldo** sul recognizer e la **persiste nel `.env`**. La validazione serve anche a tarare `DET_THRESHOLD`/`MIN_FACE_PX` e a individuare iscrizioni deboli (da ri-fare).
+
+---
+
+## 12. Bot Telegram
+
+Notifiche per soggetti **sconosciuti** + iscrizione da messaggio. Layer di messaggistica **intercambiabile** (`Notifier` astratto → un backend WhatsApp si aggiungerebbe senza toccare la detection). Disattivo di default.
+
+**`core/notifier.py`:** `TelegramNotifier` (pyTelegramBotAPI). Alert **solo testuali** (camera + ora + riferimento breve), **nessuna immagine** — coerente col design. Pulsanti inline **Autorizza/Nega**; su Autorizza il bot chiede il **nome**, poi iscrive (template cifrato + consenso) e chiama `force_reload()` → riconosciuto subito. Risponde solo al `chat_id` configurato.
+
+**Qualità degli alert (tarata sul campo):**
+
+- **Warm-up** (`UNKNOWN_ALERT_WARMUP=15s`): nessun alert nei primi secondi dall'avvio (la webcam regola l'esposizione → "sconosciuti" spuri).
+- **Debounce con grace period** (`UNKNOWN_ALERT_MIN_DURATION=1s`): serve ≥1s di "sconosciuto" *continuo* prima di allertare, ma un singolo frame perso (flicker del rilevatore) non azzera il timer → un mezzo secondo di testa girata non fa scattare nulla.
+- **Un alert alla volta**: finché non risolvi (Autorizza/Nega/nome) non ne arrivano altri (TTL 180s), più un `UNKNOWN_ALERT_COOLDOWN=10s`.
+- **Embedding fresco**: al momento del nome il bot cattura l'embedding dal frame corrente (volto reale frontale) invece del template "vecchio" da quando eri sconosciuto → la camera passa da Sconosciuto al nome quasi subito.
+
+La pipeline accumula gli embedding sconosciuti in un buffer per camera e invia l'alert in un **thread separato** (non blocca il loop di elaborazione).
+
+---
+
+## 13. Containerizzazione
+
+Un **unico `Dockerfile` parametrico** (`ARG BASE_IMAGE` / `ONNXRUNTIME_PIP` / `INSTALL_OPENCV`): il layer applicativo è identico su tutti i target, cambia solo il base image e il runtime ONNX/OpenCV.
+
+| Target | Base image | ONNX/OpenCV | Esecuzione |
+| --- | --- | --- | --- |
+| x86-64 + CUDA 12 (RTX) | `nvidia/cuda:12.x-runtime` | `onnxruntime-gpu` via pip | `--gpus all` / `docker compose` |
+| Jetson Orin Nano (L4T r36) | `l4t-base:r36.x` | dal base L4T (pip vuoto) | `--runtime nvidia` |
+| Jetson TX2 (L4T r32.7) | `l4t-base:r32.7.1` | dal base L4T (pip vuoto) | `--runtime nvidia` |
+
+- **`docker-compose.yml`** (x86): servizio con riserva GPU NVIDIA e due **volumi persistenti** — `faceid-data` (`/data`: DB SQLite, validation, benchmark, log) e `faceid-models` (`~/.insightface`: ~200 MB scaricati una volta). Utente non-root, healthcheck su `/api/cameras`.
+- **Vincolo ARM:** le immagini Jetson vanno **costruite ed eseguite sul device** (i base L4T dipendono dal driver Tegra dell'host); il cross-build su x86 con QEMU produce l'immagine ma non può validare il codice GPU.
+- **Windows:** resta **installazione nativa** (massime prestazioni CUDA), non containerizzata.
+
+I comandi build/run per ogni target sono nel [README](README.md#-installazione) e nell'header del `Dockerfile`.
+
+---
+
+## 14. Argomenti da Studiare per la Presentazione
 
 ### LIVELLO 1 — Fondamentali (obbligatori)
 
@@ -648,4 +736,4 @@ PRIVACY E SICUREZZA (studia per la parte legale)
 
 ---
 
-*Documentazione aggiornata il 10/06/2026.*
+*Documentazione aggiornata il 18/06/2026.*

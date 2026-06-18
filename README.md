@@ -14,7 +14,7 @@
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 [Funzionalità](#-funzionalità) •
-[Quick Start](#-quick-start) •
+[Installazione](#-installazione) •
 [Architettura](#%EF%B8%8F-architettura) •
 [Tracking & Mappa](#%EF%B8%8F-tracking-posizioni--mappa-live) •
 [Sicurezza](#-sicurezza) •
@@ -40,39 +40,91 @@
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Installazione
 
-```bash
-# 1 · Clona e installa
+Scegli la tua piattaforma. La **chiave di cifratura** è obbligatoria su tutte: generala con
+`python -c "import secrets; print(secrets.token_hex(32))"`.
+
+| Piattaforma | Metodo consigliato | GPU |
+| --- | --- | --- |
+| 🪟 **Windows x86-64** | **Nativo** (massime prestazioni) | CUDA via pip |
+| 🐧 **Linux x86-64 + NVIDIA** | **Docker** (CUDA come nativo) | `--gpus all` |
+| 🤖 **Jetson TX2 / Orin Nano** | **Docker, build sul device** | `--runtime nvidia` |
+
+---
+
+### 🪟 Windows — installazione nativa (consigliata)
+
+Su Windows l'installazione nativa offre le **massime prestazioni CUDA**, senza overhead di virtualizzazione.
+
+```powershell
 git clone https://github.com/leouni23/Face-recognition-Computer-Vision.git
 cd Face-recognition-Computer-Vision
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 
-# 2 · Configura
-cp .env.example .env
-#    → genera la chiave: python -c "import secrets; print(secrets.token_hex(32))"
-#    → incollala in BIOMETRIC_SECRET_KEY nel file .env
+# GPU NVIDIA (opzionale ma consigliato) — le DLL CUDA via pip sono registrate all'avvio
+pip install onnxruntime-gpu nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12
 
-# 3 · Inizializza il database e avvia
-python scripts/init_db.py
+copy .env.example .env
+#  → incolla la chiave generata in BIOMETRIC_SECRET_KEY, e per SQLite imposta:
+#    DATABASE_URL=sqlite:///./face_id.db
+
+python scripts\init_db.py
 python main.py --web
 ```
 
-Apri **[http://localhost:8000](http://localhost:8000)** → registra un volto col pulsante **"Inizia registrazione"** → il riconoscimento parte subito.
+Apri **[http://localhost:8000](http://localhost:8000)** → **"Inizia registrazione"** per iscrivere un volto.
 
-<details>
-<summary>⚡ <b>Supporto GPU NVIDIA (opzionale)</b></summary>
+---
+
+### 🐧 Linux x86-64 + NVIDIA — Docker
+
+Con il **NVIDIA Container Toolkit** la GPU passa al container con overhead trascurabile: l'accelerazione CUDA rende come in nativo.
+
+**Prerequisiti:** Docker + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Su Windows è possibile anche via Docker Desktop + WSL2 + toolkit.
 
 ```bash
-pip install onnxruntime-gpu
-pip install nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12
+git clone https://github.com/leouni23/Face-recognition-Computer-Vision.git
+cd Face-recognition-Computer-Vision
+
+# Avvia (l'immagine x86 CUDA viene costruita al primo run)
+BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
+  docker compose up --build
 ```
 
-Imposta `USE_GPU=true` nel `.env`. Su Windows le DLL CUDA installate via pip vengono registrate automaticamente all'avvio. Speedup tipico: 5-10× rispetto alla CPU.
+La Web UI è su **[http://localhost:8000](http://localhost:8000)**. DB SQLite, modelli InsightFace e dati persistono in due volumi (`faceid-data`, `faceid-models`). Per una **webcam USB** locale scommenta `devices: ["/dev/video0:/dev/video0"]` in `docker-compose.yml`; per **RTSP** imposta `CAMERA_SOURCES`. Esponendo oltre il proprio host, imposta `WEB_PASSWORD`.
 
-</details>
+---
+
+### 🤖 Jetson TX2 / Orin Nano — Docker (build **sul device**)
+
+> ⚠️ Le immagini ARM64 si basano sui base image **NVIDIA L4T**, legati al driver Tegra dell'host montato a runtime: vanno **costruite ed eseguite sul Jetson**. Il cross-build su x86 (buildx/QEMU) produce l'immagine ma **non può eseguire né validare il codice GPU**.
+
+```bash
+git clone https://github.com/leouni23/Face-recognition-Computer-Vision.git
+cd Face-recognition-Computer-Vision
+
+# --- Orin Nano (L4T r36, CUDA 12) ---
+docker build -t faceid:orin \
+  --build-arg BASE_IMAGE=nvcr.io/nvidia/l4t-base:r36.2.0 \
+  --build-arg ONNXRUNTIME_PIP="" --build-arg INSTALL_OPENCV=0 .
+
+# --- Jetson TX2 (L4T r32.7, CUDA 10.2) ---
+docker build -t faceid:tx2 \
+  --build-arg BASE_IMAGE=nvcr.io/nvidia/l4t-base:r32.7.1 \
+  --build-arg ONNXRUNTIME_PIP="" --build-arg INSTALL_OPENCV=0 .
+
+# Avvio (sostituisci il tag con la tua immagine)
+docker run --runtime nvidia -p 8000:8000 \
+  -e BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
+  -e DATABASE_URL=sqlite:////data/face_id.db \
+  -v faceid-data:/data -v faceid-models:/home/faceid/.insightface \
+  --device /dev/video0 faceid:orin
+```
+
+Su Jetson, ONNX Runtime e OpenCV provengono dal base image L4T / [jetson-containers](https://github.com/dusty-nv/jetson-containers) (i wheel pip non sono compilati per L4T) — da qui `ONNXRUNTIME_PIP=""` e `INSTALL_OPENCV=0`.
 
 ---
 
@@ -322,7 +374,7 @@ I dati biometrici sono **categoria speciale** ai sensi dell'Art. 9 GDPR.
 
 ## 📚 Documentazione
 
-La documentazione tecnica completa in italiano — architettura interna, spiegazione degli algoritmi, threading, protocolli web e guida allo studio — è in **[DOCUMENTAZIONE.md](DOCUMENTAZIONE.md)**.
+La documentazione tecnica completa in italiano è in **[DOCUMENTAZIONE.md](DOCUMENTAZIONE.md)**: architettura interna, algoritmi, threading e protocolli web, le **feature sperimentali** (strumentazione prestazioni e benchmark, modalità di validazione con FAR/FRR/DET/EER, bot Telegram, containerizzazione) e la guida allo studio.
 
 ---
 
