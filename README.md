@@ -94,7 +94,9 @@ BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))"
   docker compose up --build
 ```
 
-La Web UI è su **[http://localhost:8000](http://localhost:8000)**. DB SQLite, modelli InsightFace e dati persistono in due volumi (`faceid-data`, `faceid-models`). Per una **webcam USB** locale scommenta `devices: ["/dev/video0:/dev/video0"]` in `docker-compose.yml`; per **RTSP** imposta `CAMERA_SOURCES`. Esponendo oltre il proprio host, imposta `WEB_PASSWORD`.
+La Web UI è su **[http://localhost:8000](http://localhost:8000)**. DB SQLite, modelli InsightFace e dati persistono in due volumi (`faceid-data`, `faceid-models`).
+
+> 📦 **Immagine già pronta** (no build): `docker pull t018/faceid:x86-cuda` — [hub.docker.com/r/t018/faceid](https://hub.docker.com/r/t018/faceid). Validata: con `--gpus all` usa l'accelerazione CUDA (cuDNN incluso). Per una **webcam USB** locale scommenta `devices: ["/dev/video0:/dev/video0"]` in `docker-compose.yml`; per **RTSP** imposta `CAMERA_SOURCES`. Esponendo oltre il proprio host, imposta `WEB_PASSWORD`.
 
 ---
 
