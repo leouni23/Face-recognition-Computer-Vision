@@ -471,10 +471,10 @@ def validation_video(session_id: str, camera_id: str):
     d = _session_dir(session_id)
     if d is None:
         return jsonify({"error": "Sessione non trovata"}), 404
-    fname = f"camera_{camera_id}.mp4"
-    if not (d / fname).is_file():
+    fname = f"cam_{camera_id}.mp4"
+    if not (d / "video" / fname).is_file():
         return jsonify({"error": "Video non trovato"}), 404
-    return send_from_directory(d, fname, mimetype="video/mp4", conditional=True)
+    return send_from_directory(d / "video", fname, mimetype="video/mp4", conditional=True)
 
 
 # Frame-by-frame review: the recorded mp4 uses a codec browsers can't decode in
@@ -503,7 +503,7 @@ def validation_frame(session_id: str, camera_id: str, index: int):
     d = _session_dir(session_id)
     if d is None:
         return jsonify({"error": "Sessione non trovata"}), 404
-    path = d / f"camera_{camera_id}.mp4"
+    path = d / "video" / f"cam_{camera_id}.mp4"
     if not path.is_file():
         return jsonify({"error": "Video non trovato"}), 404
     frame = _read_frame(str(path), max(0, index))

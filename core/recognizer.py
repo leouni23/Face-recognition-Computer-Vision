@@ -41,6 +41,23 @@ class FaceRecognizer:
         pid, name, _ = templates[best_idx]
         return pid, name, float(distances[best_idx])
 
+    def rank_candidates(self, embedding: np.ndarray, k: Optional[int] = None) -> List[Tuple[int, str, float]]:
+        """Templates ranked by ascending cosine distance (closest first).
+
+        Returns up to `k` candidates as (person_id, name, distance), or all of them
+        when k is None. Used only by validation logging to record the full candidate
+        ranking, so CMC / Rank-k can be computed offline. Does not affect identify().
+        """
+        data = self._data
+        if data is None:
+            return []
+        matrix, templates = data
+        distances = 1.0 - (matrix @ embedding)
+        order = np.argsort(distances)
+        if k is not None:
+            order = order[:k]
+        return [(templates[i][0], templates[i][1], float(distances[i])) for i in order]
+
     def identify(self, embedding: np.ndarray) -> Identity:
         best = self.match(embedding)
         if best is None:

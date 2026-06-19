@@ -78,6 +78,7 @@ class ValidationManager:
                     session_id = f"{session_id}_{safe}"
             self._dir = validation_root() / session_id
             self._dir.mkdir(parents=True, exist_ok=True)
+            (self._dir / "video").mkdir(exist_ok=True)  # footage kept in a subfolder (§6 layout)
             self._jsonl = (self._dir / "detections.jsonl").open("w", encoding="utf-8")
             self._sinks = {}
             self._threshold = threshold
@@ -151,13 +152,13 @@ class ValidationManager:
                 return
             sink = self._sinks.get(camera_id)
             if sink is None:
-                sink = _CameraSink(self._dir / f"camera_{camera_id}.mp4")
+                sink = _CameraSink(self._dir / "video" / f"cam_{camera_id}.mp4")
                 self._sinks[camera_id] = sink
             frame_index = sink.write(annotated)
             for face_id, d in enumerate(details):
                 rec = {
                     "session_id": self._session_id,
-                    "timestamp": ts,
+                    "timestamp_ms": int(round(ts * 1000)),
                     "camera_id": camera_id,
                     "frame_index": frame_index,
                     "face_id": face_id,
@@ -166,6 +167,7 @@ class ValidationManager:
                     "confidence": d["confidence"],
                     "raw_cosine_distance": d["raw_cosine_distance"],
                     "best_match_person_id": d["best_match_person_id"],
+                    "candidates": d.get("candidates", []),
                     "bbox": d["bbox"],
                 }
                 self._jsonl.write(json.dumps(rec) + "\n")

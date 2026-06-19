@@ -205,12 +205,15 @@ class FaceIdPipeline:
                 results.append((loc, pid, name, conf))
                 if recording:
                     top, right, bottom, left = loc
+                    # Full candidate ranking (closest first) → enables CMC / Rank-k offline.
+                    ranked = self._recognizer.rank_candidates(embedding)
                     details.append({
                         "predicted_identity": name,
                         "predicted_person_id": pid,
                         "confidence": round(conf, 4),
                         "raw_cosine_distance": round(raw_dist, 6) if raw_dist is not None else None,
                         "best_match_person_id": best_pid if best is not None else None,
+                        "candidates": [[cpid, round(cdist, 6)] for cpid, _, cdist in ranked],
                         "bbox": [int(top), int(right), int(bottom), int(left)],
                     })
 

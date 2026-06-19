@@ -37,7 +37,7 @@ def main() -> None:
             return
         print("Sessioni:")
         for d in sessions:
-            videos = list(d.glob("*.mp4"))
+            videos = list(d.rglob("*.mp4"))
             mb = sum(v.stat().st_size for v in videos) / 1e6
             print(f"  {d.name}  ({len(videos)} video, {mb:.1f} MB)")
         return
@@ -55,7 +55,7 @@ def main() -> None:
             print(f"Non trovata: {d.name}")
             continue
         if args.video_only:
-            for v in d.glob("*.mp4"):
+            for v in d.rglob("*.mp4"):
                 v.unlink()
             print(f"Video eliminati: {d.name}")
         else:
