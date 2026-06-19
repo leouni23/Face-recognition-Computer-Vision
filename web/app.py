@@ -16,7 +16,7 @@ from config.settings import get_settings
 from core.detector import detect_and_encode
 from core.geometry import compute_homography, solve_polar_calibration
 from core.validation import validation_manager, validation_root
-from core.validation_metrics import VERDICTS, compute_and_export
+from core.validation_metrics import compute_and_export
 from database.models import Person
 from database.repository import CalibrationRepository, PersonRepository
 from database.session import get_session
@@ -378,18 +378,36 @@ def validation_sessions():
     return jsonify(out)
 
 
+@app.route("/api/validation/<session_id>/session")
+def validation_session(session_id: str):
+    """The session manifest (gallery, platform, threshold, cameras) for the review UI."""
+    d = _session_dir(session_id)
+    if d is None:
+        return jsonify({"error": "Sessione non trovata"}), 404
+    manifest = d / "session.json"
+    if not manifest.is_file():
+        return jsonify({"error": "Manifest non trovato"}), 404
+    return jsonify(json.loads(manifest.read_text(encoding="utf-8")))
+
+
 @app.route("/api/validation/<session_id>/detections")
 def validation_detections(session_id: str):
     d = _session_dir(session_id)
     if d is None:
         return jsonify({"error": "Sessione non trovata"}), 404
     dets = _read_jsonl_file(d / "detections.jsonl")
-    labels = {
-        (str(r["camera_id"]), int(r["frame_index"]), int(r["face_id"])): r["verdict"]
-        for r in _read_jsonl_file(d / "labels.jsonl")
-    }
+    labels = {}  # detection key → ground truth ({"true_person_id":..} or {"non_mate":True})
+    for r in _read_jsonl_file(d / "labels.jsonl"):  # append-only; later entries override
+        try:
+            k = (str(r["camera_id"]), int(r["frame_index"]), int(r["face_id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if r.get("non_mate") is True:
+            labels[k] = {"non_mate": True}
+        elif r.get("true_person_id") is not None:
+            labels[k] = {"true_person_id": int(r["true_person_id"])}
     for det in dets:
-        det["verdict"] = labels.get(
+        det["truth"] = labels.get(
             (str(det["camera_id"]), int(det["frame_index"]), int(det["face_id"]))
         )
     return jsonify(dets)
@@ -405,14 +423,19 @@ def validation_save_labels(session_id: str):
     rows = []
     try:
         for it in items:
-            if it.get("verdict") not in VERDICTS:
-                return jsonify({"error": f"Verdetto non valido: {it.get('verdict')}"}), 400
-            rows.append({
+            row = {
                 "camera_id": str(it["camera_id"]),
                 "frame_index": int(it["frame_index"]),
                 "face_id": int(it["face_id"]),
-                "verdict": it["verdict"],
-            })
+            }
+            # Ground truth, threshold-independent: an enrolled subject OR a non-mate.
+            if it.get("non_mate") is True:
+                row["non_mate"] = True
+            elif it.get("true_person_id") is not None:
+                row["true_person_id"] = int(it["true_person_id"])
+            else:
+                return jsonify({"error": "Label senza identità vera (true_person_id o non_mate)"}), 400
+            rows.append(row)
     except (KeyError, TypeError, ValueError):
         return jsonify({"error": "Payload label non valido"}), 400
     with (d / "labels.jsonl").open("a", encoding="utf-8") as f:
