@@ -400,7 +400,7 @@ I dati biometrici sono **categoria speciale** ai sensi dell'Art. 9 GDPR.
 
 ## 📚 Documentazione
 
-La documentazione tecnica completa in italiano è in **[DOCUMENTAZIONE.md](DOCUMENTAZIONE.md)**: architettura interna, algoritmi, threading e protocolli web, le **feature sperimentali** (strumentazione prestazioni e benchmark, modalità di validazione con FAR/FRR/DET/EER, bot Telegram, containerizzazione) e la guida allo studio.
+La documentazione tecnica completa in italiano è in **[DOCUMENTAZIONE.md](DOCUMENTAZIONE.md)**: architettura interna, algoritmi, threading e protocolli web, le **feature sperimentali** (strumentazione prestazioni e benchmark, modalità di validazione open-set 1:N con FPIR/FNIR/DET/EER/CMC, bot Telegram, containerizzazione) e la guida allo studio.
 
 ---
 

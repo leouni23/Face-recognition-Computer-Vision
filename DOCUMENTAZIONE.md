@@ -506,18 +506,37 @@ Strumentazione integrata per misurare FPS, latenza e uso risorse, visibile live 
 
 Strumento per **misurare l'accuratezza** del riconoscimento fornendo la ground truth *a posteriori*, rivedendo il filmato: il sistema da solo non può sapere se un'identificazione è corretta.
 
+Il compito valutato è **identificazione open-set 1:N** (scenario watchlist / controllo accessi: una *galleria* di iscritti e dei *probe* che includono anche persone **non iscritte** che vanno rifiutate). Quindi le metriche primarie sono **FPIR** e **FNIR** (come in NIST FRVT/FRTE 1:N, valutazione di scenario ISO/IEC 19795), con curva DET ed EER — **non** metriche di verifica 1:1. FAR/FRR sono forniti solo come alias colloquiali.
+
 > ⚠️ **Privacy:** è l'unica funzione che salva **immagini** (video annotato), deroga consapevole al design senza-immagini. Gli artefatti stanno sotto `data/validation/<id>/`, **fuori dal DB biometrico** e **mai versionati su git** (`data/` è in `.gitignore`). `scripts/clear_validation.py` li elimina dopo l'analisi.
 
-**Registrazione (`core/validation.py` → `ValidationManager`):** una sessione nominata produce, per camera, il **video annotato** (mp4) + **`detections.jsonl`** (un record per volto per frame, con `raw_cosine_distance` e `best_match_person_id` per lo sweep offline) + `session.json`. La pipeline registra ogni frame mentre la sessione è attiva (anche senza volti). Avvio/stop da UI o `python main.py --validation [NOME]`.
+**Registrazione (`core/validation.py` → `ValidationManager`):** una sessione nominata produce, per camera, il **video annotato** (`video/cam_<id>.mp4`) + **`detections.jsonl`** (un record per volto per frame: `timestamp_ms`, `raw_cosine_distance`, `best_match_person_id` e il **ranking completo dei candidati** `candidates`, così FPIR/FNIR/CMC sono ricalcolabili a qualsiasi soglia offline) + `session.json` (manifest con piattaforma auto-rilevata, galleria, soglia, camere). Allo start scrive anche **`PROTOCOL.md`**, un protocollo auto-documentante (tipo di test, schema dati, metriche, tassonomia verdetti). La pipeline registra ogni frame mentre la sessione è attiva (anche senza volti). Avvio/stop da UI o `python main.py --validation [NOME]`.
 
-**Review UI (`/validation`):**
+**Review UI (`/validation`):** layout split.
 
-- **Player a frame**: i frame JPEG sono estratti dall'mp4 on-demand (`/api/validation/<id>/frame/<cam>/<index>`) — evita il problema di codec (gli mp4 `mp4v` non sono riproducibili in `<video>`) e dà sync esatto col log. Navigazione con frecce, slider, salta-al-volto.
-- **Labeling**: 5 verdetti — `corretta` (TP), `falso_rifiuto` (FN), `falsa_accettazione` (FP, errore critico), `scambio`, `sconosciuto_corretto` (TN) — sia frame-by-frame (barra sotto il video) sia in **bulk** per identità; salvati in `labels.jsonl`.
+- **Sinistra — player a frame**: i frame JPEG sono estratti dall'mp4 on-demand (`/api/validation/<id>/frame/<cam>/<index>`) — evita il problema di codec (gli mp4 `mp4v` non sono riproducibili in `<video>`) e dà sync esatto col log. Navigazione con frecce/slider; ⏮⏭ saltano da un **evento** all'altro.
+- **Destra — timeline eventi**: le detection sono raggruppate per **soggetto e tempo** (un evento = una comparsa continua), non JSON grezzo. Ogni riga mostra intervallo temporale, identità predetta, n frame, distanza media, identità vera e verdetto derivato.
+- **Labeling per-evento**: l'operatore assegna la **identità vera** dell'evento (un iscritto della galleria, oppure *Non-mate*) — soglia-indipendente, così le metriche si ricalcolano a ogni soglia. Un click etichetta l'intero evento (bulk); tasti `1`–`9` = iscritti, `0` = Non-mate. Salvato in `labels.jsonl`. Il verdetto a soglia operativa è derivato per la visualizzazione.
 
-**Metriche (`core/validation_metrics.py`):** conteggi TP/FP/FN/TN + scambi, TPIR, `FAR = FP/(FP+TN)`, `FRR = FN/(FN+TP)`, tasso di corretto rifiuto. Lo **sweep della soglia** sulle distribuzioni genuini/impostori produce la **curva DET** e l'**EER** con la soglia operativa; export in `metrics.json` + `threshold_sweep.csv`. Con più camere, anche il breakdown **per-camera**. Tutto riproducibile dai JSONL senza rieseguire le camere.
+**Tassonomia verdetti** (derivati da identità vera + distanze): `mate_correct` (Mate corretto, TP), `mate_miss` (Mate mancato → FNIR), `swap` (Scambio → FNIR, a parte), `false_positive` (Falso positivo → FPIR, critico), `non_mate_correct` (Non-mate corretto, TN).
+
+**Metriche (`core/validation_metrics.py`):** unità di analisi = **evento/track** (i frame consecutivi dello stesso soggetto si aggregano per voto di maggioranza; il per-frame è riportato come secondario, con caveat di correlazione). Calcola:
+
+- **FPIR** = eventi non-mate accettati / eventi non-mate; **FNIR** = eventi mate non identificati correttamente (miss + scambio) / eventi mate.
+- **Curva DET** spazzando la soglia su tutte le `raw_cosine_distance` → `det_curve.csv`; **EER**; **FNIR a FPIR fisso** (1% e 0.3%, punti operativi di sicurezza).
+- **Rank-1 e CMC** dai ranking dei candidati → `cmc.csv`.
+- **Intervalli di confidenza Wilson** su FPIR/FNIR, **regola del 3** (limite ~3/N a zero errori) e **flag rule-of-30** di Doddington (<30 errori → stima imprecisa).
+- **FAR/FRR** come alias etichettati. Breakdown **per-camera** con più camere. Export `metrics.json` + `det_curve.csv` + `cmc.csv`. Tutto riproducibile dai JSONL senza rieseguire le camere.
 
 **Come migliora davvero la precisione:** la rete ArcFace è **pre-addestrata e congelata** (non si ri-addestra). Ma il risultato della validazione si applica al sistema: il bottone **"Applica soglia EER"** (`POST /api/settings/match_threshold`) imposta la `MATCH_THRESHOLD` ottimale **a caldo** sul recognizer e la **persiste nel `.env`**. La validazione serve anche a tarare `DET_THRESHOLD`/`MIN_FACE_PX` e a individuare iscrizioni deboli (da ri-fare).
+
+**Layout dei file** prodotti per sessione:
+
+```text
+data/validation/<session_id>/
+  PROTOCOL.md   session.json   detections.jsonl   labels.jsonl
+  metrics.json  det_curve.csv  cmc.csv            video/cam_<id>.mp4
+```
 
 ---
 
