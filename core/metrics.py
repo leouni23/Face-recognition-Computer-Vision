@@ -10,6 +10,7 @@ Two independent pieces:
   backend at runtime — NVML (`pynvml`) on x86+NVIDIA, `tegrastats` on Jetson (L4T),
   `psutil`-only fallback elsewhere. Every field degrades to None if unavailable.
 """
+import platform
 import re
 import shutil
 import subprocess
@@ -265,3 +266,50 @@ def get_resource_metrics() -> dict:
     except Exception as exc:  # never let metrics crash the request
         logger.debug(f"Metrics read fallita: {exc}")
         return _empty_metrics()
+
+
+# ── Platform label (for the validation manifest / PROTOCOL.md) ──────────────────
+
+
+def _arch() -> str:
+    m = platform.machine().lower()
+    if m in ("amd64", "x86_64", "x64"):
+        return "x86"
+    if m in ("aarch64", "arm64"):
+        return "arm64"
+    return m or "unknown"
+
+
+def _slug_gpu(name: str) -> str:
+    """'NVIDIA GeForce RTX 2080' → 'rtx2080' (compact, filesystem/label-safe)."""
+    s = name.lower()
+    for noise in ("nvidia", "geforce", "(r)", "(tm)"):
+        s = s.replace(noise, " ")
+    return re.sub(r"[^a-z0-9]+", "", s) or "gpu"
+
+
+def _jetson_model() -> Optional[str]:
+    """Read the Jetson board name from the device tree → jetson-tx2 / jetson-orin / …"""
+    try:
+        txt = Path("/proc/device-tree/model").read_text(errors="ignore").lower()
+    except Exception:
+        return None
+    for key in ("tx2", "orin", "xavier", "nano", "tx1"):
+        if key in txt:
+            return f"jetson-{key}"
+    return "jetson" if "jetson" in txt or "tegra" in txt else None
+
+
+def detect_platform_label() -> str:
+    """A short hardware label (e.g. 'jetson-tx2', 'jetson-orin', 'x86-rtx2080', 'x86-cpu').
+
+    Auto-detected so each validation session records where it ran. Reuses the resource
+    provider's backend/GPU name; on Jetson the board is read from the device tree.
+    """
+    metrics = get_resource_metrics()
+    backend = metrics.get("backend")
+    if backend == _TegrastatsProvider.backend:
+        return _jetson_model() or "jetson"
+    if backend == _NvmlProvider.backend and metrics.get("gpu_name"):
+        return f"{_arch()}-{_slug_gpu(metrics['gpu_name'])}"
+    return f"{_arch()}-cpu"
