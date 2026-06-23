@@ -21,7 +21,11 @@ ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 FROM ${BASE_IMAGE} AS builder
 
 ENV PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1 DEBIAN_FRONTEND=noninteractive
-ARG ONNXRUNTIME_PIP=onnxruntime-gpu
+# Pin onnxruntime-gpu to the last CUDA-12 release: the BASE_IMAGE is a CUDA 12
+# cudnn-runtime, but onnxruntime-gpu ≥1.23 links CUDA 13 (libcudart.so.13) — an
+# unpinned install there loads no CUDA and silently runs on CPU. Bumping the base
+# to a CUDA 13 image? then move this pin up in lockstep.
+ARG ONNXRUNTIME_PIP=onnxruntime-gpu==1.22.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-dev build-essential \
