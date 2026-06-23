@@ -365,6 +365,16 @@ def _attach_truth(detections: List[dict], labels: Dict[Tuple, Tuple[bool, Option
             det["_is_mate"], det["_true_id"] = truth
 
 
+def _slim(m: dict) -> dict:
+    """Compact view of a metrics dict for a breakdown row (no DET/CMC/per-frame payloads)."""
+    return {
+        "counts": {"mate_events": m["counts"]["mate_events"],
+                   "non_mate_events": m["counts"]["non_mate_events"],
+                   "verdicts": m["counts"]["verdicts"]},
+        "fpir": m["fpir"], "fnir": m["fnir"], "rank1": m["rank1"], "eer": m["eer"],
+    }
+
+
 def compute_session_metrics(session_dir: Path) -> dict:
     detections = _read_jsonl(session_dir / "detections.jsonl")
     labels: Dict[Tuple, Tuple[bool, Optional[int]]] = {}
@@ -377,12 +387,23 @@ def compute_session_metrics(session_dir: Path) -> dict:
     threshold = _session_threshold(session_dir)
     result = _metrics_from(detections, threshold)
 
+    def breakdown(field: str) -> Dict[str, dict]:
+        keys = sorted({d.get(field) for d in detections if d.get(field)})
+        return {k: _slim(_metrics_from([d for d in detections if d.get(field) == k], threshold)) for k in keys}
+
     cameras = sorted({str(d["camera_id"]) for d in detections})
     if len(cameras) > 1:
         result["per_camera"] = {
-            cam: _metrics_from([d for d in detections if str(d["camera_id"]) == cam], threshold)
+            cam: _slim(_metrics_from([d for d in detections if str(d["camera_id"]) == cam], threshold))
             for cam in cameras
         }
+    # How accuracy varies across the controlled conditions and across subjects (condition-aware)
+    condition = breakdown("preset_id")
+    if condition:
+        result["per_condition"] = condition
+    subject = breakdown("subject_label")
+    if subject:
+        result["per_subject"] = subject
     return result
 
 
