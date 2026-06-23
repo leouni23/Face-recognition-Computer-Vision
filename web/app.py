@@ -427,9 +427,15 @@ def validation_detections(session_id: str):
         elif r.get("true_person_id") is not None:
             labels[k] = {"true_person_id": int(r["true_person_id"])}
     for det in dets:
-        det["truth"] = labels.get(
-            (str(det["camera_id"]), int(det["frame_index"]), int(det["face_id"]))
-        )
+        k = (str(det["camera_id"]), int(det["frame_index"]), int(det["face_id"]))
+        if k in labels:                              # manual label wins (correction / common)
+            det["truth"] = labels[k]
+        elif det.get("non_mate") is True:            # else automatic GT from the run context
+            det["truth"] = {"non_mate": True}
+        elif det.get("true_person_id") is not None:
+            det["truth"] = {"true_person_id": int(det["true_person_id"])}
+        else:
+            det["truth"] = None
     return jsonify(dets)
 
 
