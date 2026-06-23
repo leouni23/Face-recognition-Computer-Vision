@@ -556,12 +556,44 @@ def set_match_threshold():
     return jsonify({"value": value, "persisted": persisted})
 
 
+def _segments_index(d: Path, camera_id: str) -> list:
+    f = d / "video" / "segments.json"
+    if f.is_file():
+        try:
+            return json.loads(f.read_text(encoding="utf-8")).get(str(camera_id), [])
+        except Exception:
+            return []
+    return []
+
+
+def _locate_frame(d: Path, camera_id: str, index: int):
+    """Map a GLOBAL frame index → (segment file Path, local index). Falls back to a legacy
+    single-file recording. Returns (None, 0) when nothing matches."""
+    for s in _segments_index(d, camera_id):
+        if s["first_frame"] <= index <= s["last_frame"]:
+            return d / "video" / s["file"], index - s["first_frame"]
+    legacy = d / "video" / f"cam_{camera_id}.mp4"  # pre-segmentation sessions
+    if legacy.is_file():
+        return legacy, index
+    segs = _segments_index(d, camera_id)
+    if segs:  # out-of-range index → clamp to the first segment
+        return d / "video" / segs[0]["file"], 0
+    return None, 0
+
+
 @app.route("/api/validation/<session_id>/video/<camera_id>")
 def validation_video(session_id: str, camera_id: str):
+    """Download a recorded segment (?seg=N; default the first). Segments avoid FAT32's 4 GB limit."""
     d = _session_dir(session_id)
     if d is None:
         return jsonify({"error": "Sessione non trovata"}), 404
-    fname = f"cam_{camera_id}.mp4"
+    segs = _segments_index(d, camera_id)
+    if segs:
+        seg = request.args.get("seg", type=int)
+        chosen = next((s for s in segs if s["segment"] == seg), segs[0]) if seg is not None else segs[0]
+        fname = chosen["file"]
+    else:
+        fname = f"cam_{camera_id}.mp4"  # legacy single-file
     if not (d / "video" / fname).is_file():
         return jsonify({"error": "Video non trovato"}), 404
     return send_from_directory(d / "video", fname, mimetype="video/mp4", conditional=True)
@@ -593,10 +625,10 @@ def validation_frame(session_id: str, camera_id: str, index: int):
     d = _session_dir(session_id)
     if d is None:
         return jsonify({"error": "Sessione non trovata"}), 404
-    path = d / "video" / f"cam_{camera_id}.mp4"
-    if not path.is_file():
+    path, local = _locate_frame(d, camera_id, max(0, index))  # global index → segment + local
+    if path is None or not path.is_file():
         return jsonify({"error": "Video non trovato"}), 404
-    frame = _read_frame(str(path), max(0, index))
+    frame = _read_frame(str(path), max(0, local))
     if frame is None:
         return jsonify({"error": "Frame non disponibile"}), 404
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])

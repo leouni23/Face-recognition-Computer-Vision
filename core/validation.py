@@ -23,6 +23,7 @@ from loguru import logger
 
 from config.settings import get_settings
 from core.metrics import detect_platform_label
+from core.storage import SEG_MAX_BYTES, SEG_MAX_FRAMES
 from core.validation_presets import load_presets, load_subjects, subject_truth
 
 _settings = get_settings()
@@ -145,23 +146,84 @@ Tutto ricomputabile da `detections.jsonl` + `labels.jsonl`: ri-etichettare e ric
 
 
 class _CameraSink:
-    def __init__(self, video_path: Path):
-        self._video_path = video_path
-        self._writer: Optional[cv2.VideoWriter] = None
-        self.frame_index = -1  # incremented to 0 on first frame
+    """Writes the annotated footage for one camera as rotating segments.
 
-    def write(self, annotated):
+    The video is split into `cam_<id>_NNN.mp4` segments (rotated at SEG_MAX_FRAMES or
+    SEG_MAX_BYTES) so FAT32's 4 GB single-file limit is never hit and review stays manageable.
+    `frame_index` is GLOBAL and continuous across segments; a segment index records, per
+    segment, the global first/last frame and timestamps so the review UI can play seamlessly.
+    """
+
+    def __init__(self, video_dir: Path, camera_id: str):
+        self._dir = video_dir
+        self._cam = camera_id
+        self._writer: Optional[cv2.VideoWriter] = None
+        self.frame_index = -1            # global, incremented to 0 on the first frame
+        self.segments: List[dict] = []   # finalized segments
+        self._seg_no = -1
+        self._seg_first = 0
+        self._seg_first_ts = 0
+        self._frames_in_seg = 0
+        self._cur_file = ""
+        self._last_ts = 0
+
+    def _open_segment(self, w: int, h: int, ts: float) -> None:
+        self._seg_no += 1
+        self._seg_first = self.frame_index + 1
+        self._seg_first_ts = int(round(ts * 1000))
+        self._frames_in_seg = 0
+        self._cur_file = f"cam_{self._cam}_{self._seg_no:03d}.mp4"
+        self._writer = cv2.VideoWriter(str(self._dir / self._cur_file), _FOURCC, _NOMINAL_FPS, (w, h))
+
+    def _close_segment(self) -> None:
         if self._writer is None:
-            h, w = annotated.shape[:2]
-            self._writer = cv2.VideoWriter(str(self._video_path), _FOURCC, _NOMINAL_FPS, (w, h))
+            return
+        self._writer.release()
+        self._writer = None
+        if self._frames_in_seg > 0:
+            self.segments.append({
+                "segment": self._seg_no, "file": self._cur_file,
+                "first_frame": self._seg_first, "last_frame": self.frame_index,
+                "first_ts": self._seg_first_ts, "last_ts": self._last_ts,
+            })
+
+    def write(self, annotated, ts: float) -> int:
+        h, w = annotated.shape[:2]
+        if self._writer is None:
+            self._open_segment(w, h, ts)
+        # rotate on frame cap, or on size (checked periodically — VideoWriter hides bytes written)
+        rotate = self._frames_in_seg >= SEG_MAX_FRAMES
+        if not rotate and self._frames_in_seg and self._frames_in_seg % 300 == 0:
+            try:
+                if (self._dir / self._cur_file).stat().st_size >= SEG_MAX_BYTES:
+                    rotate = True
+            except OSError:
+                pass
+        if rotate:
+            self._close_segment()
+            self._open_segment(w, h, ts)
         self.frame_index += 1
+        self._frames_in_seg += 1
+        self._last_ts = int(round(ts * 1000))
         self._writer.write(annotated)
         return self.frame_index
 
-    def close(self):
-        if self._writer is not None:
-            self._writer.release()
-            self._writer = None
+    def segment_count(self) -> int:
+        return len(self.segments) + (1 if self._writer is not None else 0)
+
+    def index(self) -> List[dict]:
+        """Segment index including the still-open current segment (for live status/review)."""
+        idx = list(self.segments)
+        if self._writer is not None and self._frames_in_seg > 0:
+            idx.append({
+                "segment": self._seg_no, "file": self._cur_file,
+                "first_frame": self._seg_first, "last_frame": self.frame_index,
+                "first_ts": self._seg_first_ts, "last_ts": self._last_ts,
+            })
+        return idx
+
+    def close(self) -> None:
+        self._close_segment()
 
 
 class ValidationManager:
@@ -262,6 +324,10 @@ class ValidationManager:
             if self._jsonl:
                 self._jsonl.flush()
                 self._jsonl.close()
+            # Persist the per-camera segment index so the review UI can play across segments.
+            segments = {cam: s.index() for cam, s in self._sinks.items()}
+            (self._dir / "video" / "segments.json").write_text(
+                json.dumps(segments, indent=2), encoding="utf-8")
             self._meta["end"] = datetime.now().isoformat()
             self._meta["cameras"] = sorted(self._sinks.keys())
             self._meta["frames"] = {cam: s.frame_index + 1 for cam, s in self._sinks.items()}
@@ -285,6 +351,7 @@ class ValidationManager:
                 "run": dict(self._run),
                 "destination": self._meta.get("destination"),
                 "frames": {cam: s.frame_index + 1 for cam, s in self._sinks.items()},
+                "segments": {cam: s.segment_count() for cam, s in self._sinks.items()},
             }
 
     def _write_manifest(self):
@@ -314,9 +381,9 @@ class ValidationManager:
                 return
             sink = self._sinks.get(camera_id)
             if sink is None:
-                sink = _CameraSink(self._dir / "video" / f"cam_{camera_id}.mp4")
+                sink = _CameraSink(self._dir / "video", camera_id)
                 self._sinks[camera_id] = sink
-            frame_index = sink.write(annotated)
+            frame_index = sink.write(annotated, ts)
             for face_id, d in enumerate(details):
                 rec = {
                     "session_id": self._session_id,
