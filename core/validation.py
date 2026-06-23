@@ -23,14 +23,32 @@ from loguru import logger
 
 from config.settings import get_settings
 from core.metrics import detect_platform_label
+from core.validation_presets import load_presets, load_subjects, subject_truth
 
 _settings = get_settings()
 _FOURCC = cv2.VideoWriter_fourcc(*"mp4v")
 _NOMINAL_FPS = 15.0  # playback fps; review syncs by frame_index, not wall-clock
 
+# Active destination root for validation artifacts (may be an external disk chosen by the
+# operator). The biometric DB always stays on internal storage, separate from this.
+_dest_root: Optional[Path] = None
+
+
+def _default_root() -> Path:
+    base = _settings.validation_dir.strip() if _settings.validation_dir else ""
+    return Path(base) if base else Path(_settings.data_dir) / "validation"
+
 
 def validation_root() -> Path:
-    return Path(_settings.data_dir) / "validation"
+    return _dest_root if _dest_root is not None else _default_root()
+
+
+def set_destination(path: Optional[str]) -> Path:
+    """Point the validation volume at `path` (…/validation under it), or reset to default
+    when falsy. Only the bulky append-only artifacts go here — never the DB."""
+    global _dest_root
+    _dest_root = (Path(path) / "validation") if path else None
+    return validation_root()
 
 
 def build_protocol_md(meta: dict) -> str:
@@ -62,7 +80,9 @@ sistema deve **rifiutare**. Valutazione di scenario secondo **ISO/IEC 19795**; m
 Non è una verifica 1:1: FAR/FRR sono forniti solo come alias colloquiali di FPIR/FNIR.
 
 ## 2. Configurazione della sessione
+- **Tipo sessione:** {'sessione comune (soggetti statici, labeling manuale)' if meta.get('session_type') == 'common' else 'attraversamento singolo-soggetto (ground-truth automatica dal soggetto dichiarato)'}
 - **Piattaforma:** `{meta.get('platform', 'n/d')}`
+- **Destinazione artefatti:** `{(meta.get('destination') or {}).get('root', 'n/d')}`
 - **Telecamere:** {cam_line}
 - **Soglia operativa** (distanza coseno, accetta se `<` soglia): **{meta.get('threshold')}**
 - **Avvio:** {meta.get('start')}
@@ -154,15 +174,23 @@ class ValidationManager:
         self._sinks: Dict[str, _CameraSink] = {}
         self._threshold: float = _settings.match_threshold
         self._meta: dict = {}
+        self._session_type: str = "crossing"
+        # Current run context (which subject is crossing + under which condition preset).
+        # Set via set_run_context(); used to tag detections and derive automatic ground truth.
+        self._run: dict = {"subject_label": None, "preset_id": None, "true_person_id": None, "non_mate": None}
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def is_active(self, camera_id: Optional[str] = None) -> bool:
         return self._active
 
-    def start(self, name: str, enrolled: List[dict], threshold: float) -> dict:
+    def start(self, name: str, enrolled: List[dict], threshold: float, *,
+              session_type: str = "crossing", subjects: Optional[dict] = None,
+              presets: Optional[List[dict]] = None, destination: Optional[str] = None) -> dict:
         with self._lock:
             if self._active:
                 raise RuntimeError("Sessione di validazione già attiva")
+            if destination is not None:
+                set_destination(destination)  # external disk (validated by the caller)
             session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
             if name:
                 safe = "".join(c for c in name if c.isalnum() or c in "-_")[:40]
@@ -175,21 +203,55 @@ class ValidationManager:
             self._sinks = {}
             self._threshold = threshold
             self._session_id = session_id
+            self._session_type = session_type if session_type in ("crossing", "common") else "crossing"
+            self._run = {"subject_label": None, "preset_id": None, "true_person_id": None, "non_mate": None}
+            subjects = subjects if subjects is not None else load_subjects()
+            preset_list = presets if presets is not None else load_presets()
             self._meta = {
                 "session_id": session_id,
                 "name": name,
+                "session_type": self._session_type,
                 "platform": detect_platform_label(),
                 "start": datetime.now().isoformat(),
                 "end": None,
                 "threshold": threshold,
                 "enrolled": enrolled,
+                "subjects": subjects,
+                # full preset parameters snapshotted → record is self-contained if a preset is later edited
+                "presets": {p["preset_id"]: p for p in preset_list},
+                "destination": {"root": str(self._dir.parent)},
                 "cameras": list(_settings.cameras),  # configured; finalized to seen-cameras at stop
             }
             self._write_manifest()
             self._write_protocol()
             self._active = True
-            logger.success(f"[Validation] Sessione avviata: {session_id} ({self._dir})")
-            return {"session_id": session_id, "dir": str(self._dir)}
+            logger.success(f"[Validation] Sessione avviata: {session_id} ({self._dir}) [{self._session_type}]")
+            return {"session_id": session_id, "dir": str(self._dir), "session_type": self._session_type}
+
+    def set_run_context(self, subject_label: Optional[str], preset_id: Optional[str]) -> dict:
+        """Set which subject is now crossing and under which condition preset. Subsequent
+        detections are tagged with this and, for a declared subject, get automatic ground
+        truth (S→mate person_id, U→non-mate). Logged to runs.jsonl with the frame index."""
+        with self._lock:
+            if not self._active:
+                raise RuntimeError("Nessuna sessione di validazione attiva")
+            gt = subject_truth(subject_label) if subject_label else None
+            if subject_label and gt is None:
+                raise ValueError(f"Soggetto non nel registro: {subject_label}")
+            if preset_id and preset_id not in self._meta.get("presets", {}):
+                raise ValueError(f"Preset non in sessione: {preset_id}")
+            self._run = {
+                "subject_label": subject_label or None,
+                "preset_id": preset_id or None,
+                "true_person_id": (gt or {}).get("true_person_id"),
+                "non_mate": (gt or {}).get("non_mate"),
+            }
+            frame_index = max((s.frame_index for s in self._sinks.values()), default=-1) + 1
+            rec = {"timestamp_ms": int(round(time.time() * 1000)), "frame_index": frame_index, **self._run}
+            with (self._dir / "runs.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+            logger.info(f"[Validation] Run context: soggetto={subject_label} preset={preset_id} @frame {frame_index}")
+            return dict(self._run)
 
     def stop(self) -> dict:
         with self._lock:
@@ -218,7 +280,10 @@ class ValidationManager:
             return {
                 "active": True,
                 "session_id": self._session_id,
+                "session_type": self._session_type,
                 "threshold": self._threshold,
+                "run": dict(self._run),
+                "destination": self._meta.get("destination"),
                 "frames": {cam: s.frame_index + 1 for cam, s in self._sinks.items()},
             }
 
@@ -267,6 +332,12 @@ class ValidationManager:
                     "candidates": d.get("candidates", []),
                     "bbox": d["bbox"],
                 }
+                # Run-context tags + automatic ground truth (crossing sessions). For a common
+                # session the run context is unset → no GT here (manual labelling is used).
+                run = self._run
+                for field in ("subject_label", "preset_id", "true_person_id", "non_mate"):
+                    if run.get(field) is not None:
+                        rec[field] = run[field]
                 self._jsonl.write(json.dumps(rec) + "\n")
             self._jsonl.flush()
 

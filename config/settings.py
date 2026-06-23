@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     position_log_interval: float = 1.0  # seconds between saved position points per person/camera
     metrics_enabled: bool = True  # pipeline timing instrumentation (overhead trascurabile)
     data_dir: str = "data"  # base dir per artefatti persistenti (DB, validation, benchmark, log)
+    validation_dir: str = ""  # override root artefatti validazione (vuoto → data_dir/validation); può puntare a un disco esterno. Il DB resta su storage interno.
     # Notifiche Telegram (alert soggetti sconosciuti + enrollment da messaggio)
     telegram_enabled: bool = False
     telegram_bot_token: str = ""

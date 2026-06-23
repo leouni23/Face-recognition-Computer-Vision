@@ -350,10 +350,26 @@ def validation_start():
             .all()
         ]
     try:
-        info = validation_manager.start(name, enrolled, _settings.match_threshold)
+        info = validation_manager.start(
+            name, enrolled, _settings.match_threshold,
+            session_type=data.get("session_type", "crossing"),
+            destination=(data.get("destination") or None),
+        )
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 409
     return jsonify({**info, "enrolled": enrolled, "threshold": _settings.match_threshold})
+
+
+@app.route("/api/validation/run", methods=["POST"])
+def validation_set_run():
+    """Set the current run context (which subject is crossing + condition preset).
+    Subsequent detections are tagged and get automatic ground truth (crossing sessions)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        ctx = validation_manager.set_run_context(data.get("subject_label"), data.get("preset_id"))
+    except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(ctx)
 
 
 @app.route("/api/validation/stop", methods=["POST"])

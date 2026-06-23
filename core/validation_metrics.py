@@ -344,9 +344,22 @@ def _metrics_from(detections: List[dict], threshold: float) -> dict:
     }
 
 
+def _declared_truth(det: dict) -> Optional[Tuple[bool, Optional[int]]]:
+    """Ground truth tagged onto the detection itself by the run context (crossing sessions:
+    the operator declared who was crossing). Used when there is no manual label override."""
+    if det.get("non_mate") is True:
+        return (False, None)
+    tid = det.get("true_person_id")
+    if tid is not None:
+        return (True, int(tid))
+    return None
+
+
 def _attach_truth(detections: List[dict], labels: Dict[Tuple, Tuple[bool, Optional[int]]]) -> None:
     for det in detections:
-        truth = labels.get(_key(det))
+        truth = labels.get(_key(det))          # manual label wins (override / common sessions)
+        if truth is None:
+            truth = _declared_truth(det)        # else automatic GT from the declared subject
         det["_truth"] = truth
         if truth is not None:
             det["_is_mate"], det["_true_id"] = truth
