@@ -534,9 +534,39 @@ Il compito valutato è **identificazione open-set 1:N** (scenario watchlist / co
 
 ```text
 data/validation/<session_id>/
-  PROTOCOL.md   session.json   detections.jsonl   labels.jsonl
-  metrics.json  det_curve.csv  cmc.csv            video/cam_<id>.mp4
+  PROTOCOL.md   session.json   detections.jsonl   labels.jsonl   runs.jsonl
+  metrics.json  det_curve.csv  cmc.csv            video/cam_<id>_NNN.mp4   video/segments.json
 ```
+
+I preset di condizione e il registro soggetti sono globali e riusabili: `data/validation_presets.json`, `data/validation_subjects.json`.
+
+### 11.1 Setup esperimento (preset, soggetti, sessioni, run)
+
+Per rendere le metriche *condition-aware* e la raccolta probe frictionless, la pagina `/validation` aggiunge un setup configurabile una volta e riusato:
+
+- **Preset di condizione** (`core/validation_presets.py`): condizioni ambientali controllate di un attraversamento — posizione camera vs soggetto (frontale/laterale/angolata + angolo) e illuminazione (numero luci, disposizione, angolo) + note. CRUD da UI; i **parametri interi** vengono copiati nel `session.json` (record self-contained anche se il preset viene poi modificato).
+- **Registro soggetti**: `S1…Sn` iscritti mappati a un `person_id` della galleria (mate); `U1…Un` sconosciuti **anonimi**, solo numero (non-mate — privacy). `subject_truth(label)` fornisce la verità a terra soglia-indipendente.
+- **Tipi di sessione**: *attraversamento singolo-soggetto* (1 camera, 1 preset) e *sessione comune* (10 soggetti statici).
+- **Run context + ground-truth automatica**: con `set_run_context(subject, preset)` (POST `/api/validation/run`) l'operatore dichiara chi sta attraversando e sotto quale condizione; ogni detection è taggata con `subject_label`/`preset_id` e — negli attraversamenti — riceve la **GT automatica** (S→mate `true_person_id`, U→`non_mate`): nessun labeling manuale. I cambi di run sono loggati in `runs.jsonl`. La **sessione comune** usa il labeling manuale esistente.
+- **Wizard di avvio** (UI): destinazione → tipo+nome → soggetto (saltato per comune) → preset → conferma. Durante la registrazione un **summary live** mostra soggetto, condizione, destinazione, frame/segmenti e tempo, con cambio run a 2 tap.
+- **Metriche per-condizione/per-soggetto**: `metrics.json` aggiunge `per_condition[preset_id]` e `per_subject[label]` (FPIR/FNIR/rank-1) per vedere come l'accuratezza varia tra le condizioni.
+
+### 11.2 Disco esterno e filesystem
+
+Gli artefatti (video, JSONL, CSV) possono andare su un **HDD/SSD esterno**: `VALIDATION_DIR` nel `.env` o il picker nel wizard (`core/storage.py`: rilevamento dischi via `psutil`, validazione scrivibilità/spazio/filesystem). **Vincoli gestiti:**
+
+- Il **database SQLite resta sempre su storage interno** (ext4): FAT32/exFAT/NTFS hanno problemi di permessi/lock POSIX. Solo gli artefatti append-only vanno sull'esterno; l'app non monta dischi né installa driver (lavora con percorsi **già montati**).
+- Il **video è registrato a segmenti** (`cam_<id>_NNN.mp4`, rotazione a ~3.5 GB o ~10 min) con indice `segments.json`: così il **limite 4 GB di FAT32** non viene mai raggiunto e la review scorre tra i segmenti (mapping frame-globale→segmento lato server).
+
+**Montaggio host per piattaforma** (l'app usa il path già montato):
+
+| FS | Linux/Jetson | Note |
+| --- | --- | --- |
+| **FAT32** (`vfat`) | nativo (`mount /dev/sdX1 /mnt/ext`) | limite 4 GB/file → gestito con i segmenti |
+| **NTFS** | `ntfs-3g` (`apt install ntfs-3g`) | scritture sequenziali ok |
+| **exFAT** | `exfat-fuse` + `exfatprogs` (`apt install exfat-fuse exfatprogs`) | su **Jetson TX2** (kernel vecchio) può servire il driver kernel exFAT abilitato / un rebuild; su JetPack recenti di norma ok |
+
+**Docker:** il disco si monta **sull'host** e si fa **bind-mount** nel container (`-v /mnt/ext/faceid:/data/ext`), poi `VALIDATION_DIR=/data/ext`. L'app dentro il container scrive sul bind-mount; non gestisce mount/driver.
 
 ---
 
