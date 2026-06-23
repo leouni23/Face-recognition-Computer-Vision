@@ -20,6 +20,7 @@ from core.validation_metrics import compute_and_export
 from core.validation_presets import (
     delete_preset, duplicate_preset, load_presets, load_subjects, save_subjects, upsert_preset,
 )
+from core.storage import estimate_bytes, list_drives, validate_target
 from database.models import Person
 from database.repository import CalibrationRepository, PersonRepository
 from database.session import get_session
@@ -499,6 +500,23 @@ def validation_subjects():
     if request.method == "GET":
         return jsonify(load_subjects())
     return jsonify(save_subjects(request.get_json(silent=True) or {}))
+
+
+# ── Destination volume (external-disk picker) ──────────────────────────────────
+
+@app.route("/api/storage/drives")
+def storage_drives():
+    """Currently mounted partitions (mountpoint, filesystem, free space) for the picker."""
+    return jsonify(list_drives())
+
+
+@app.route("/api/storage/validate", methods=["POST"])
+def storage_validate():
+    """Validate a chosen destination (writable / free space / filesystem) before Start."""
+    data = request.get_json(silent=True) or {}
+    minutes = data.get("minutes")
+    est = estimate_bytes(float(minutes)) if minutes else 0
+    return jsonify(validate_target(data.get("path", ""), est))
 
 
 def _persist_env(key: str, value: str) -> bool:
