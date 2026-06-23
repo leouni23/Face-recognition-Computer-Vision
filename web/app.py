@@ -17,6 +17,9 @@ from core.detector import detect_and_encode
 from core.geometry import compute_homography, solve_polar_calibration
 from core.validation import validation_manager, validation_root
 from core.validation_metrics import compute_and_export
+from core.validation_presets import (
+    delete_preset, duplicate_preset, load_presets, load_subjects, save_subjects, upsert_preset,
+)
 from database.models import Person
 from database.repository import CalibrationRepository, PersonRepository
 from database.session import get_session
@@ -450,6 +453,36 @@ def validation_compute_metrics(session_id: str):
     if d is None:
         return jsonify({"error": "Sessione non trovata"}), 404
     return jsonify(compute_and_export(d))
+
+
+# ── Condition presets + subject registry (validation experiment setup) ──────────
+
+@app.route("/api/validation/presets", methods=["GET", "POST"])
+def validation_presets():
+    if request.method == "GET":
+        return jsonify(load_presets())
+    preset = upsert_preset(request.get_json(silent=True) or {})
+    return jsonify(preset)
+
+
+@app.route("/api/validation/presets/<preset_id>", methods=["DELETE"])
+def validation_delete_preset(preset_id: str):
+    return jsonify({"deleted": delete_preset(preset_id)})
+
+
+@app.route("/api/validation/presets/<preset_id>/duplicate", methods=["POST"])
+def validation_duplicate_preset(preset_id: str):
+    copy = duplicate_preset(preset_id)
+    if copy is None:
+        return jsonify({"error": "Preset non trovato"}), 404
+    return jsonify(copy)
+
+
+@app.route("/api/validation/subjects", methods=["GET", "POST"])
+def validation_subjects():
+    if request.method == "GET":
+        return jsonify(load_subjects())
+    return jsonify(save_subjects(request.get_json(silent=True) or {}))
 
 
 def _persist_env(key: str, value: str) -> bool:
