@@ -7,6 +7,7 @@ let sessionId = null, gallery = [], threshold = null;
 let detections = [], cameras = [], curCam = null, segments = [];
 let curIndex = 0, maxIndex = 0, t0ms = null;
 let playTimer = null, detChart = null, cmcChart = null;
+let noVideo = false;   // session recorded no footage → hide the frame player, review via timeline only
 
 // ── Sessions ───────────────────────────────────────────────────────────────
 function refreshSessions() {
@@ -38,8 +39,11 @@ function loadSession() {
   ]).then(([manifest, dets]) => {
     gallery = manifest.enrolled || [];
     threshold = manifest.threshold;
+    noVideo = manifest.record_video === false;
+    document.getElementById('player-block').classList.toggle('hidden', noVideo);
+    document.getElementById('no-video-note').classList.toggle('hidden', !noVideo);
     document.getElementById('sess-meta').textContent =
-      `${manifest.session_type || ''} · ${gallery.length} iscritti · soglia ${threshold ?? '—'} · ${manifest.platform || ''}`;
+      `${manifest.session_type || ''} · ${noVideo ? 'senza video' : 'video'} · ${gallery.length} iscritti · soglia ${threshold ?? '—'} · ${manifest.platform || ''}`;
     detections = dets;
     t0ms = dets.reduce((m, d) => Math.min(m, d.timestamp_ms ?? Infinity), Infinity);
     if (!isFinite(t0ms)) t0ms = null;
@@ -106,8 +110,10 @@ function currentSegment() {
 function setFrame(i) {
   if (!sessionId || curCam == null) return;
   curIndex = Math.max(0, Math.min(maxIndex, i));
-  document.getElementById('frame-img').src =
-    `/api/validation/${encodeURIComponent(sessionId)}/frame/${encodeURIComponent(curCam)}/${curIndex}`;
+  if (!noVideo) {
+    document.getElementById('frame-img').src =
+      `/api/validation/${encodeURIComponent(sessionId)}/frame/${encodeURIComponent(curCam)}/${curIndex}`;
+  }
   document.getElementById('frame-slider').value = curIndex;
   document.getElementById('frame-info').textContent = `frame ${curIndex} / ${maxIndex} · ${vtime(curIndex)}`;
   renderEventBar();

@@ -504,11 +504,11 @@ Strumentazione integrata per misurare FPS, latenza e uso risorse, visibile live 
 
 ## 11. Modalità di Validazione (esperimenti)
 
-Strumento per **misurare l'accuratezza** del riconoscimento fornendo la ground truth *a posteriori*, rivedendo il filmato: il sistema da solo non può sapere se un'identificazione è corretta.
+Strumento per **misurare l'accuratezza** del riconoscimento fornendo la ground truth: il sistema da solo non può sapere se un'identificazione è corretta. La verità a terra si stabilisce **dal vivo** (presentazione controllata: soggetto dichiarato per gli attraversamenti, mappa dei posti per la sessione comune) — modalità di **default, senza video** — oppure *a posteriori* rivedendo il filmato, se la registrazione video è esplicitamente attivata (fallback).
 
-Il compito valutato è **identificazione open-set 1:N** (scenario watchlist / controllo accessi: una *galleria* di iscritti e dei *probe* che includono anche persone **non iscritte** che vanno rifiutate). Quindi le metriche primarie sono **FPIR** e **FNIR** (come in NIST FRVT/FRTE 1:N, valutazione di scenario ISO/IEC 19795), con curva DET ed EER — **non** metriche di verifica 1:1. FAR/FRR sono forniti solo come alias colloquiali.
+Il compito valutato è **identificazione open-set 1:N** (scenario watchlist / controllo accessi: una *galleria* di iscritti e dei *probe* che includono anche persone **non iscritte** che vanno rifiutate). Quindi le metriche primarie sono **FPIR** e **FNIR** (come in NIST FRVT/FRTE 1:N, valutazione di scenario ISO/IEC 19795), con curva DET ed EER — **non** metriche di verifica 1:1. FAR/FRR sono forniti solo come alias colloquiali. **Le metriche sono identiche** nelle due modalità: entrambe alimentano `detections.jsonl` + `labels.jsonl`.
 
-> ⚠️ **Privacy:** è l'unica funzione che salva **immagini** (video annotato), deroga consapevole al design senza-immagini. Gli artefatti stanno sotto `data/validation/<id>/`, **fuori dal DB biometrico** e **mai versionati su git** (`data/` è in `.gitignore`). `scripts/clear_validation.py` li elimina dopo l'analisi.
+> ⚠️ **Privacy:** di **default non viene salvata alcuna immagine** (`VALIDATION_RECORD_VIDEO=false`) → ripristino della postura «no images on disk». La registrazione del video annotato resta disponibile come **fallback opt-in** (toggle per-sessione o `.env`): in quel caso è l'unica funzione che salva immagini, deroga consapevole al design senza-immagini. Gli artefatti stanno sotto `data/validation/<id>/`, **fuori dal DB biometrico** e **mai versionati su git** (`data/` è in `.gitignore`). `scripts/clear_validation.py` li elimina dopo l'analisi. Dettagli e razionale: vedi **`validazione_senza_video_addendum.md`**.
 
 **Registrazione (`core/validation.py` → `ValidationManager`):** una sessione nominata produce, per camera, il **video annotato** (`video/cam_<id>.mp4`) + **`detections.jsonl`** (un record per volto per frame: `timestamp_ms`, `raw_cosine_distance`, `best_match_person_id` e il **ranking completo dei candidati** `candidates`, così FPIR/FNIR/CMC sono ricalcolabili a qualsiasi soglia offline) + `session.json` (manifest con piattaforma auto-rilevata, galleria, soglia, camere). Allo start scrive anche **`PROTOCOL.md`**, un protocollo auto-documentante (tipo di test, schema dati, metriche, tassonomia verdetti). La pipeline registra ogni frame mentre la sessione è attiva (anche senza volti). Avvio/stop da UI o `python main.py --validation [NOME]`.
 
@@ -567,6 +567,18 @@ Gli artefatti (video, JSONL, CSV) possono andare su un **HDD/SSD esterno**: `VAL
 | **exFAT** | `exfat-fuse` + `exfatprogs` (`apt install exfat-fuse exfatprogs`) | su **Jetson TX2** (kernel vecchio) può servire il driver kernel exFAT abilitato / un rebuild; su JetPack recenti di norma ok |
 
 **Docker:** il disco si monta **sull'host** e si fa **bind-mount** nel container (`-v /mnt/ext/faceid:/data/ext`), poi `VALIDATION_DIR=/data/ext`. L'app dentro il container scrive sul bind-mount; non gestisce mount/driver.
+
+### 11.3 Modalità senza video (default) — ground truth dal vivo
+
+Di default una sessione **non registra video** (`VALIDATION_RECORD_VIDEO=false`; toggle "Registra video" per-sessione nel wizard). Nessun byte di immagine tocca il disco: si scrivono solo i log testuali append-only. La verità a terra è stabilita **dal vivo**, per *presentazione controllata* (coerente con ISO/IEC 19795), in tre modi complementari:
+
+- **Attraversamenti** — invariati: il soggetto dichiarato (`set_run_context`) dà la GT automatica per detection. Non serviva il video già prima.
+- **Sessione comune — mappa dei posti** (`set_seating_map`, POST `/api/validation/seating`): l'operatore dichiara i posti occupati nell'ordine **sinistra→destra, fila per fila** → soggetto. A ogni frame le detection vengono **ordinate per posizione del bbox** (righe raggruppate per banda verticale con tolleranza ~0.6× l'altezza mediana del volto, poi sinistra→destra) e ciascuna riceve la GT del posto corrispondente, scritta in `detections.jsonl` come per gli attraversamenti. Deterministico, senza video, senza click. Se il numero di volti ≠ numero di posti, vengono etichettate solo le posizioni allineate (le eccedenze restano senza verità anziché essere assegnate male).
+- **Correzione live click-to-assign** (`GET /api/validation/live/<cam>` + POST `/<id>/labels`): nel pannello live l'operatore clicca un volto sullo stream e assegna il soggetto; la label manuale finisce in `labels.jsonl` e **ha priorità** sulla GT automatica (a livello di frame). Il fotogramma è mostrato ma **mai salvato**. Per correzioni a livello di evento si usa il pannello di revisione (assegnazione bulk per evento), che funziona anche senza video.
+
+`frame_index` è gestito da un **contatore per-camera del manager** (unica fonte di verità, con o senza video). Nel layout dei file, quando il video è spento la cartella `video/` non viene creata. La modalità è scelta da `record_video` in `POST /api/validation/start`; `session.json` registra `record_video` e `ground_truth_source`, e `PROTOCOL.md` si adatta di conseguenza.
+
+> **Compromesso:** senza video **non c'è audit trail a posteriori** — non si può rivedere il filmato per contestare un'etichetta o ispezionare un errore. In contesti che richiedono quella verificabilità, attivare il video come fallback. Razionale completo: **`validazione_senza_video_addendum.md`**.
 
 ---
 

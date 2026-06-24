@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     metrics_enabled: bool = True  # pipeline timing instrumentation (overhead trascurabile)
     data_dir: str = "data"  # base dir per artefatti persistenti (DB, validation, benchmark, log)
     validation_dir: str = ""  # override root artefatti validazione (vuoto → data_dir/validation); può puntare a un disco esterno. Il DB resta su storage interno.
+    validation_record_video: bool = False  # default validazione senza video (nessuna immagine su disco); per-sessione si può riattivare
     # Notifiche Telegram (alert soggetti sconosciuti + enrollment da messaggio)
     telegram_enabled: bool = False
     telegram_bot_token: str = ""

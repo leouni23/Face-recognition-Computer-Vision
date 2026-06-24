@@ -69,6 +69,27 @@ def build_protocol_md(meta: dict) -> str:
         f"(`{repo_protocol.name}`); quanto sotto ne è la versione operativa per questa sessione.\n"
         if repo_protocol.exists() else ""
     )
+    record_video = meta.get("record_video", True)
+    gt_labels = {
+        "crossing-declared": "soggetto dichiarato per ogni attraversamento (automatica)",
+        "seating-map": "mappa dei posti dichiarata per la sessione comune (automatica)",
+        "manual-live": "assegnazione live click-to-assign (manuale)",
+    }
+    gt_source = gt_labels.get(meta.get("ground_truth_source"), "dichiarata / manuale")
+    # §3 + §6 footage rows only when video is actually recorded.
+    video_schema = (
+        "\n`video/cam_<id>.mp4` — video **annotato** (box + nome + confidenza), sincronizzato per\n"
+        "`frame_index`. È materiale sensibile (reintroduce immagini): resta solo nel volume, separato dal\n"
+        "DB biometrico, ed è cancellabile con `scripts/clear_validation.py`.\n"
+        if record_video else
+        "\n**Nessun video** è registrato in questa sessione: nessuna immagine viene scritta su disco\n"
+        "(ripristino della postura «no images on disk»). La verità a terra è stabilita **dal vivo**\n"
+        "(presentazione controllata: soggetto dichiarato o mappa dei posti) — vedi\n"
+        "`validazione_senza_video_addendum.md`. Compromesso: **nessun audit trail a posteriori**\n"
+        "senza il video.\n"
+    )
+    video_layout = "\n  metrics.json  det_curve.csv  cmc.csv            video/cam_<id>.mp4" if record_video \
+        else "\n  metrics.json  det_curve.csv  cmc.csv            runs.jsonl   _(nessun video)_"
     return f"""# Protocollo di test — sessione `{meta.get('session_id')}`
 
 _Generato automaticamente all'avvio della sessione di validazione._
@@ -81,7 +102,9 @@ sistema deve **rifiutare**. Valutazione di scenario secondo **ISO/IEC 19795**; m
 Non è una verifica 1:1: FAR/FRR sono forniti solo come alias colloquiali di FPIR/FNIR.
 
 ## 2. Configurazione della sessione
-- **Tipo sessione:** {'sessione comune (soggetti statici, labeling manuale)' if meta.get('session_type') == 'common' else 'attraversamento singolo-soggetto (ground-truth automatica dal soggetto dichiarato)'}
+- **Tipo sessione:** {'sessione comune (soggetti statici)' if meta.get('session_type') == 'common' else 'attraversamento singolo-soggetto (ground-truth automatica dal soggetto dichiarato)'}
+- **Registrazione video:** {'sì (video annotato per camera)' if record_video else '**no** — nessuna immagine su disco'}
+- **Verità a terra:** {gt_source}
 - **Piattaforma:** `{meta.get('platform', 'n/d')}`
 - **Destinazione artefatti:** `{(meta.get('destination') or {}).get('root', 'n/d')}`
 - **Telecamere:** {cam_line}
@@ -102,10 +125,7 @@ predicted_identity, confidence, raw_cosine_distance, best_match_person_id, candi
 
 `labels.jsonl` — verità a terra per detection/evento: `true_person_id` (iscritto) **oppure**
 `non_mate: true`. Da questa, soglia-indipendente, si derivano verdetti e curve.
-
-`video/cam_<id>.mp4` — video **annotato** (box + nome + confidenza), sincronizzato per
-`frame_index`. È materiale sensibile (reintroduce immagini): resta solo nel volume, separato dal
-DB biometrico, ed è cancellabile con `scripts/clear_validation.py`.
+{video_schema}
 
 ## 4. Etichettatura (verità a terra)
 L'operatore assegna a ogni **evento** (comparsa continua di un soggetto) la sua **identità vera**:
@@ -139,8 +159,7 @@ Tutto ricomputabile da `detections.jsonl` + `labels.jsonl`: ri-etichettare e ric
 ## 6. Layout dei file
 ```
 {meta.get('session_id')}/
-  PROTOCOL.md   session.json   detections.jsonl   labels.jsonl
-  metrics.json  det_curve.csv  cmc.csv            video/cam_<id>.mp4
+  PROTOCOL.md   session.json   detections.jsonl   labels.jsonl{video_layout}
 ```
 """
 
@@ -187,7 +206,10 @@ class _CameraSink:
                 "first_ts": self._seg_first_ts, "last_ts": self._last_ts,
             })
 
-    def write(self, annotated, ts: float) -> int:
+    def write(self, annotated, ts: float, frame_index: int) -> int:
+        """Write one annotated frame. `frame_index` is the manager-owned global counter
+        (single source of truth, shared with the JSONL) — the sink no longer increments
+        its own, so video segments and detections can never drift apart."""
         h, w = annotated.shape[:2]
         if self._writer is None:
             self._open_segment(w, h, ts)
@@ -202,7 +224,7 @@ class _CameraSink:
         if rotate:
             self._close_segment()
             self._open_segment(w, h, ts)
-        self.frame_index += 1
+        self.frame_index = frame_index
         self._frames_in_seg += 1
         self._last_ts = int(round(ts * 1000))
         self._writer.write(annotated)
@@ -237,6 +259,15 @@ class ValidationManager:
         self._threshold: float = _settings.match_threshold
         self._meta: dict = {}
         self._session_type: str = "crossing"
+        self._record_video: bool = _settings.validation_record_video
+        # Per-camera global frame counter — the single source of truth for frame_index,
+        # whether or not video is recorded (when recording, it is also passed to the sink).
+        self._frames: Dict[str, int] = {}
+        # Latest processed frame per camera (boxes only) for live click-to-assign; never persisted.
+        self._last_frame: Dict[str, dict] = {}
+        # Seating map for a common session: ordered list of resolved seats
+        # [{"seat", "label", "true_person_id", "non_mate"}], left→right then row by row.
+        self._seating: Optional[List[dict]] = None
         # Current run context (which subject is crossing + under which condition preset).
         # Set via set_run_context(); used to tag detections and derive automatic ground truth.
         self._run: dict = {"subject_label": None, "preset_id": None, "true_person_id": None, "non_mate": None}
@@ -247,12 +278,16 @@ class ValidationManager:
 
     def start(self, name: str, enrolled: List[dict], threshold: float, *,
               session_type: str = "crossing", subjects: Optional[dict] = None,
-              presets: Optional[List[dict]] = None, destination: Optional[str] = None) -> dict:
+              presets: Optional[List[dict]] = None, destination: Optional[str] = None,
+              record_video: Optional[bool] = None) -> dict:
         with self._lock:
             if self._active:
                 raise RuntimeError("Sessione di validazione già attiva")
             if destination is not None:
                 set_destination(destination)  # external disk (validated by the caller)
+            self._record_video = (
+                _settings.validation_record_video if record_video is None else bool(record_video)
+            )
             session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
             if name:
                 safe = "".join(c for c in name if c.isalnum() or c in "-_")[:40]
@@ -260,19 +295,27 @@ class ValidationManager:
                     session_id = f"{session_id}_{safe}"
             self._dir = validation_root() / session_id
             self._dir.mkdir(parents=True, exist_ok=True)
-            (self._dir / "video").mkdir(exist_ok=True)  # footage kept in a subfolder (§6 layout)
+            if self._record_video:
+                (self._dir / "video").mkdir(exist_ok=True)  # footage kept in a subfolder (§6 layout)
             self._jsonl = (self._dir / "detections.jsonl").open("w", encoding="utf-8")
             self._sinks = {}
+            self._frames = {}
+            self._last_frame = {}
+            self._seating = None
             self._threshold = threshold
             self._session_id = session_id
             self._session_type = session_type if session_type in ("crossing", "common") else "crossing"
             self._run = {"subject_label": None, "preset_id": None, "true_person_id": None, "non_mate": None}
+            # How ground truth is established this session (no-video modes derive it live).
+            gt_source = "crossing-declared" if self._session_type == "crossing" else "manual-live"
             subjects = subjects if subjects is not None else load_subjects()
             preset_list = presets if presets is not None else load_presets()
             self._meta = {
                 "session_id": session_id,
                 "name": name,
                 "session_type": self._session_type,
+                "record_video": self._record_video,
+                "ground_truth_source": gt_source,
                 "platform": detect_platform_label(),
                 "start": datetime.now().isoformat(),
                 "end": None,
@@ -287,8 +330,14 @@ class ValidationManager:
             self._write_manifest()
             self._write_protocol()
             self._active = True
-            logger.success(f"[Validation] Sessione avviata: {session_id} ({self._dir}) [{self._session_type}]")
-            return {"session_id": session_id, "dir": str(self._dir), "session_type": self._session_type}
+            mode = "video" if self._record_video else "no-video"
+            logger.success(
+                f"[Validation] Sessione avviata: {session_id} ({self._dir}) "
+                f"[{self._session_type} · {mode}]")
+            return {
+                "session_id": session_id, "dir": str(self._dir),
+                "session_type": self._session_type, "record_video": self._record_video,
+            }
 
     def set_run_context(self, subject_label: Optional[str], preset_id: Optional[str]) -> dict:
         """Set which subject is now crossing and under which condition preset. Subsequent
@@ -308,34 +357,89 @@ class ValidationManager:
                 "true_person_id": (gt or {}).get("true_person_id"),
                 "non_mate": (gt or {}).get("non_mate"),
             }
-            frame_index = max((s.frame_index for s in self._sinks.values()), default=-1) + 1
+            frame_index = max(self._frames.values(), default=-1) + 1
             rec = {"timestamp_ms": int(round(time.time() * 1000)), "frame_index": frame_index, **self._run}
             with (self._dir / "runs.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec) + "\n")
             logger.info(f"[Validation] Run context: soggetto={subject_label} preset={preset_id} @frame {frame_index}")
             return dict(self._run)
 
+    def set_seating_map(self, seats: List[dict]) -> dict:
+        """Declare the seating map for a common session: an ordered list of occupied positions
+        (left→right, rows top→bottom) → subject label (`S…`/`U…`). Each detected face is then
+        assigned the ground truth of the matching seat (deterministic, no video, no clicking).
+        Labels are resolved against the registry up front (unknown → error)."""
+        with self._lock:
+            if not self._active:
+                raise RuntimeError("Nessuna sessione di validazione attiva")
+            if self._session_type != "common":
+                raise RuntimeError("La seating-map si applica solo alle sessioni comuni")
+            resolved: List[dict] = []
+            for pos, s in enumerate(seats or []):
+                label = (s.get("label") or "").strip()
+                if not label:
+                    continue
+                gt = subject_truth(label)
+                if gt is None:
+                    raise ValueError(f"Soggetto non nel registro: {label}")
+                resolved.append({
+                    "seat": s.get("seat", pos),
+                    "label": label,
+                    "true_person_id": gt.get("true_person_id"),
+                    "non_mate": gt.get("non_mate"),
+                })
+            self._seating = resolved or None
+            self._meta["ground_truth_source"] = "seating-map" if resolved else "manual-live"
+            self._meta["seating"] = resolved
+            self._write_manifest()
+            rec = {"timestamp_ms": int(round(time.time() * 1000)),
+                   "frame_index": max(self._frames.values(), default=-1) + 1,
+                   "seating": resolved}
+            with (self._dir / "runs.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+            logger.info(f"[Validation] Seating-map: {len(resolved)} posti dichiarati")
+            return {"seating": resolved}
+
+    def live_detections(self, camera_id: str) -> dict:
+        """Latest processed frame's boxes for one camera (for live click-to-assign). Returns
+        metadata only — frame_index + per-face bbox/predicted identity; no image is kept."""
+        with self._lock:
+            if not self._active:
+                return {"active": False}
+            snap = self._last_frame.get(camera_id) or {}
+            return {
+                "active": True,
+                "session_id": self._session_id,
+                "camera_id": camera_id,
+                "frame_index": snap.get("frame_index"),
+                "faces": snap.get("faces", []),
+            }
+
     def stop(self) -> dict:
         with self._lock:
             if not self._active:
                 return {"active": False}
-            for sink in self._sinks.values():
-                sink.close()
             if self._jsonl:
                 self._jsonl.flush()
                 self._jsonl.close()
-            # Persist the per-camera segment index so the review UI can play across segments.
-            segments = {cam: s.index() for cam, s in self._sinks.items()}
-            (self._dir / "video" / "segments.json").write_text(
-                json.dumps(segments, indent=2), encoding="utf-8")
+            if self._record_video:
+                for sink in self._sinks.values():
+                    sink.close()
+                # Persist the per-camera segment index so the review UI can play across segments.
+                segments = {cam: s.index() for cam, s in self._sinks.items()}
+                (self._dir / "video" / "segments.json").write_text(
+                    json.dumps(segments, indent=2), encoding="utf-8")
+            # Cameras/frames come from the global counter (works with or without video).
             self._meta["end"] = datetime.now().isoformat()
-            self._meta["cameras"] = sorted(self._sinks.keys())
-            self._meta["frames"] = {cam: s.frame_index + 1 for cam, s in self._sinks.items()}
+            self._meta["cameras"] = sorted(self._frames.keys())
+            self._meta["frames"] = {cam: idx + 1 for cam, idx in self._frames.items()}
             self._write_manifest()
             sid = self._session_id
             self._active = False
             self._jsonl = None
             self._sinks = {}
+            self._frames = {}
+            self._last_frame = {}
             logger.success(f"[Validation] Sessione terminata: {sid}")
             return {"active": False, "session_id": sid}
 
@@ -347,10 +451,13 @@ class ValidationManager:
                 "active": True,
                 "session_id": self._session_id,
                 "session_type": self._session_type,
+                "record_video": self._record_video,
+                "ground_truth_source": self._meta.get("ground_truth_source"),
                 "threshold": self._threshold,
                 "run": dict(self._run),
+                "seating": self._seating,
                 "destination": self._meta.get("destination"),
-                "frames": {cam: s.frame_index + 1 for cam, s in self._sinks.items()},
+                "frames": {cam: idx + 1 for cam, idx in self._frames.items()},
                 "segments": {cam: s.segment_count() for cam, s in self._sinks.items()},
             }
 
@@ -362,32 +469,82 @@ class ValidationManager:
     def _write_protocol(self):
         (self._dir / "PROTOCOL.md").write_text(build_protocol_md(self._meta), encoding="utf-8")
 
+    # ── seating-map ordering ──────────────────────────────────────────────────
+    @staticmethod
+    def _order_faces_by_seat(details: List[dict]) -> List[int]:
+        """Return detection indices in reading order: rows top→bottom, left→right within a
+        row. Rows are grouped by vertical center with a tolerance of ~0.6× the median face
+        height, so small vertical jitter doesn't split a row. bbox = [top, right, bottom, left].
+        """
+        if not details:
+            return []
+        items = []
+        for i, d in enumerate(details):
+            top, right, bottom, left = d["bbox"]
+            items.append((i, (left + right) / 2.0, (top + bottom) / 2.0, max(1.0, bottom - top)))
+        med_h = sorted(x[3] for x in items)[len(items) // 2]
+        tol = 0.6 * med_h
+        rows: List[List[tuple]] = []
+        for it in sorted(items, key=lambda x: x[2]):           # by vertical center
+            if rows and (it[2] - rows[-1][0][2]) <= tol:        # within tol of the row anchor
+                rows[-1].append(it)
+            else:
+                rows.append([it])
+        order: List[int] = []
+        for row in rows:
+            order.extend(it[0] for it in sorted(row, key=lambda x: x[1]))  # left→right
+        return order
+
+    def _seating_truth(self, details: List[dict]) -> Dict[int, dict]:
+        """Map each detection (by face_id) to its declared seat's ground truth. Extra faces
+        beyond the declared seats stay unlabeled rather than being mis-assigned."""
+        out: Dict[int, dict] = {}
+        for seat_pos, face_idx in enumerate(self._order_faces_by_seat(details)):
+            if seat_pos >= len(self._seating):
+                break
+            seat = self._seating[seat_pos]
+            out[face_idx] = {
+                "subject_label": seat.get("label"),
+                "true_person_id": seat.get("true_person_id"),
+                "non_mate": seat.get("non_mate"),
+            }
+        return out
+
     # ── per-frame recording ───────────────────────────────────────────────────
     def record(self, camera_id: str, frame, results, details: List[dict]) -> None:
-        """Write one annotated video frame + the JSONL detection records for it.
-
-        `results` is the pipeline's [(location, pid, name, conf), ...]; `details` the
-        aligned list of per-face dicts (raw distance, best match, bbox). Called for every
-        processed frame while active — including frames with zero detections (continuous video).
+        """Write the per-detection JSONL for one frame (and, when video is on, an annotated
+        video frame). `results` is the pipeline's [(location, pid, name, conf), ...]; `details`
+        the aligned per-face dicts. Called for every processed frame while active — including
+        zero-detection frames. With video off, no image bytes are ever written to disk.
         """
         if not self._active:
             return
-        from ui.display import annotate_frame  # lazy: avoids core↔ui import cycle
-
-        annotated = annotate_frame(frame, results)
+        annotated = None
+        if self._record_video:
+            from ui.display import annotate_frame  # lazy: avoids core↔ui import cycle
+            annotated = annotate_frame(frame, results)
         ts = time.time()
+        ts_ms = int(round(ts * 1000))
         with self._lock:
             if not self._active:
                 return
-            sink = self._sinks.get(camera_id)
-            if sink is None:
-                sink = _CameraSink(self._dir / "video", camera_id)
-                self._sinks[camera_id] = sink
-            frame_index = sink.write(annotated, ts)
+            # Manager-owned global frame counter (single source of truth, video or not).
+            frame_index = self._frames.get(camera_id, -1) + 1
+            self._frames[camera_id] = frame_index
+            if self._record_video:
+                sink = self._sinks.get(camera_id)
+                if sink is None:
+                    sink = _CameraSink(self._dir / "video", camera_id)
+                    self._sinks[camera_id] = sink
+                sink.write(annotated, ts, frame_index)
+            # Seating-map automatic ground truth (common session): position → declared seat.
+            seat_gt = (self._seating_truth(details)
+                       if self._session_type == "common" and self._seating else None)
+            faces_live = []
             for face_id, d in enumerate(details):
                 rec = {
                     "session_id": self._session_id,
-                    "timestamp_ms": int(round(ts * 1000)),
+                    "timestamp_ms": ts_ms,
                     "camera_id": camera_id,
                     "frame_index": frame_index,
                     "face_id": face_id,
@@ -399,14 +556,28 @@ class ValidationManager:
                     "candidates": d.get("candidates", []),
                     "bbox": d["bbox"],
                 }
-                # Run-context tags + automatic ground truth (crossing sessions). For a common
-                # session the run context is unset → no GT here (manual labelling is used).
-                run = self._run
-                for field in ("subject_label", "preset_id", "true_person_id", "non_mate"):
-                    if run.get(field) is not None:
-                        rec[field] = run[field]
+                # Condition tag (per-condition breakdown) — independent of the GT source.
+                if self._run.get("preset_id") is not None:
+                    rec["preset_id"] = self._run["preset_id"]
+                # Ground truth: seating map for a common session; otherwise the crossing run
+                # context. Manual labels.jsonl still override either at metric time.
+                gt = seat_gt.get(face_id) if seat_gt is not None else None
+                if gt is not None:
+                    for k in ("subject_label", "true_person_id", "non_mate"):
+                        if gt.get(k) is not None:
+                            rec[k] = gt[k]
+                elif seat_gt is None:
+                    for field in ("subject_label", "true_person_id", "non_mate"):
+                        if self._run.get(field) is not None:
+                            rec[field] = self._run[field]
                 self._jsonl.write(json.dumps(rec) + "\n")
+                faces_live.append({"face_id": face_id, "bbox": d["bbox"],
+                                   "predicted_identity": d["predicted_identity"]})
             self._jsonl.flush()
+            # Latest boxes for live click-to-assign — metadata only, never an image on disk.
+            self._last_frame[camera_id] = {
+                "frame_index": frame_index, "ts_ms": ts_ms, "faces": faces_live,
+            }
 
 
 validation_manager = ValidationManager()

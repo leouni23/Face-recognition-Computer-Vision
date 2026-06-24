@@ -158,7 +158,12 @@
       <div data-step="5" class="wiz-step space-y-3 hidden">
         <div class="text-sm font-semibold text-gray-300">5 · Conferma</div>
         <div id="wiz-summary" class="bg-gray-950 rounded-xl p-3 text-sm space-y-1"></div>
-        <button onclick="startRecording()" class="big-btn bg-emerald-600 hover:bg-emerald-500 w-full">● Avvia registrazione</button>
+        <label class="flex items-center gap-2 bg-gray-950 rounded-xl p-3 text-sm cursor-pointer">
+          <input type="checkbox" id="rec-video" class="accent-emerald-500 w-4 h-4" />
+          <span>Registra video annotato</span>
+          <span class="text-[11px] text-gray-500 ml-1">— se spento: <b>nessuna immagine salvata su disco</b> (verità a terra dal vivo)</span>
+        </label>
+        <button onclick="startRecording()" class="big-btn bg-emerald-600 hover:bg-emerald-500 w-full">● Avvia sessione</button>
       </div>
 
       <div class="flex items-center gap-2 pt-1 border-t border-gray-800/60">
@@ -174,7 +179,9 @@
         <span id="live-elapsed" class="ml-auto tabular-nums text-gray-300 text-sm"></span>
       </div>
       <div id="live-cards" class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm"></div>
-      <div class="bg-gray-950 rounded-xl p-3 space-y-2">
+
+      <!-- Crossing: declared subject per crossing -->
+      <div id="crossing-live" class="bg-gray-950 rounded-xl p-3 space-y-2">
         <div class="text-[11px] text-gray-500">Attraversamento corrente — cambia quando entra un nuovo soggetto:</div>
         <div class="flex flex-wrap items-center gap-2">
           <select id="live-subject" class="fld"></select>
@@ -183,7 +190,34 @@
           <span id="live-run-msg" class="text-xs text-gray-500"></span>
         </div>
       </div>
-      <button onclick="stopSession()" class="big-btn bg-red-600 hover:bg-red-500 w-full">■ Ferma registrazione</button>
+
+      <!-- Common: seating map (automatic GT) + live click-to-assign (correction) -->
+      <div id="common-live" class="hidden space-y-3">
+        <div class="bg-gray-950 rounded-xl p-3 space-y-2">
+          <div class="text-[11px] text-gray-500">Disposizione posti (sinistra→destra, fila per fila) → soggetto dichiarato. La verità a terra è assegnata automaticamente per posizione, <b>senza video</b>.</div>
+          <div id="seat-rows" class="space-y-1.5"></div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="addSeat()" class="text-xs text-emerald-400 hover:text-emerald-300">+ aggiungi posto</button>
+            <button onclick="applySeating()" class="ml-auto px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold">Applica disposizione</button>
+            <span id="seat-msg" class="text-xs text-gray-500"></span>
+          </div>
+        </div>
+        <div class="bg-gray-950 rounded-xl p-3 space-y-2">
+          <div class="text-[11px] text-gray-500">Correzione dal vivo: clicca un volto e assegna il soggetto. La label manuale ha priorità; il fotogramma è mostrato ma <b>non salvato</b>.</div>
+          <div class="flex items-center gap-2 text-xs">
+            <span class="text-gray-500">Camera</span>
+            <select id="label-cam" class="fld" onchange="restartLiveLabel()"></select>
+            <span id="label-msg" class="text-gray-500 ml-auto"></span>
+          </div>
+          <div id="label-wrap" class="relative inline-block max-w-full rounded-xl overflow-hidden border border-gray-800">
+            <img id="label-stream" class="block max-w-full" alt="live" />
+            <div id="label-overlay" class="absolute inset-0 pointer-events-none"></div>
+          </div>
+          <div id="label-picker" class="hidden flex flex-wrap gap-1.5 pt-1"></div>
+        </div>
+      </div>
+
+      <button onclick="stopSession()" class="big-btn bg-red-600 hover:bg-red-500 w-full">■ Ferma sessione</button>
     </section>
 
     <!-- ══ Revisione & verità a terra (review) ══ -->
@@ -205,20 +239,25 @@
             <select id="cam-sel" onchange="switchCamera()" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 focus:outline-none"></select>
             <span id="frame-info" class="ml-auto tabular-nums text-gray-300 font-medium"></span>
           </div>
-          <div class="rounded-xl bg-black overflow-hidden border border-gray-800">
-            <img id="frame-img" class="w-full block" alt="frame" />
+          <div id="player-block" class="space-y-2">
+            <div class="rounded-xl bg-black overflow-hidden border border-gray-800">
+              <img id="frame-img" class="w-full block" alt="frame" />
+            </div>
+            <div class="flex items-center gap-2 text-sm">
+              <button onclick="playPause()" id="play-btn" class="ctrl font-semibold w-24">▶ Play</button>
+              <button onclick="gotoEvent(-1)" class="ctrl" title="evento precedente">⏮ evento</button>
+              <button onclick="setFrame(curIndex-1)" class="ctrl" title="frame indietro (←)">◀</button>
+              <button onclick="setFrame(curIndex+1)" class="ctrl" title="frame avanti (→)">▶</button>
+              <button onclick="gotoEvent(1)" class="ctrl" title="evento successivo">evento ⏭</button>
+            </div>
+            <input id="frame-slider" type="range" min="0" max="0" value="0" oninput="setFrame(+this.value)" class="w-full" />
+            <p class="text-[11px] text-gray-500">
+              <kbd>←</kbd> <kbd>→</kbd> frame · ⏮⏭ eventi · <kbd>1</kbd>…<kbd>9</kbd> iscritto · <kbd>0</kbd> Non-mate (correzione manuale dell'evento)
+            </p>
           </div>
-          <div class="flex items-center gap-2 text-sm">
-            <button onclick="playPause()" id="play-btn" class="ctrl font-semibold w-24">▶ Play</button>
-            <button onclick="gotoEvent(-1)" class="ctrl" title="evento precedente">⏮ evento</button>
-            <button onclick="setFrame(curIndex-1)" class="ctrl" title="frame indietro (←)">◀</button>
-            <button onclick="setFrame(curIndex+1)" class="ctrl" title="frame avanti (→)">▶</button>
-            <button onclick="gotoEvent(1)" class="ctrl" title="evento successivo">evento ⏭</button>
+          <div id="no-video-note" class="hidden rounded-xl bg-gray-950 border border-gray-800 p-3 text-xs text-gray-400">
+            Sessione <b>senza video</b>: nessuna immagine è stata salvata. Rivedi gli eventi nella timeline a destra e correggi la verità a terra da lì (selezione evento → identità). Le metriche si calcolano normalmente.
           </div>
-          <input id="frame-slider" type="range" min="0" max="0" value="0" oninput="setFrame(+this.value)" class="w-full" />
-          <p class="text-[11px] text-gray-500">
-            <kbd>←</kbd> <kbd>→</kbd> frame · ⏮⏭ eventi · <kbd>1</kbd>…<kbd>9</kbd> iscritto · <kbd>0</kbd> Non-mate (correzione manuale dell'evento)
-          </p>
           <div id="event-label-bar" class="bg-gray-900 rounded-xl p-3 space-y-2 min-h-[3rem]">
             <p class="text-xs text-gray-600">Scegli una sessione e scorri agli eventi.</p>
           </div>
@@ -456,15 +495,22 @@ function wizNav(dir) {
 }
 function renderWizSummary() {
   const p = presets.find(x=>x.preset_id===(wiz.presetId||document.getElementById('preset-pick').value));
+  const rv = document.getElementById('rec-video').checked;
   document.getElementById('wiz-summary').innerHTML = `
     <div><span class="text-gray-500">Destinazione:</span> ${wiz.destination ? esc(wiz.destination) : 'interno (default)'}</div>
     <div><span class="text-gray-500">Tipo:</span> ${wiz.sessionType==='common'?'sessione comune':'attraversamenti'} · <b>${esc(document.getElementById('sess-name').value||'(senza nome)')}</b></div>
     ${wiz.sessionType==='crossing'?`<div><span class="text-gray-500">Primo soggetto:</span> ${esc(wiz.subjectLabel||'—')}</div>`:''}
-    <div><span class="text-gray-500">Condizione:</span> ${p?esc(p.name):'—'}</div>`;
+    <div><span class="text-gray-500">Condizione:</span> ${p?esc(p.name):'—'}</div>
+    <div><span class="text-gray-500">Video:</span> ${rv?'sì':'<b class="text-emerald-400">no — nessuna immagine su disco</b>'}</div>`;
 }
 function startRecording() {
   wiz.presetId = document.getElementById('preset-pick').value;
-  const body = { name: document.getElementById('sess-name').value.trim(), session_type: wiz.sessionType, destination: wiz.destination || null };
+  const body = {
+    name: document.getElementById('sess-name').value.trim(),
+    session_type: wiz.sessionType,
+    destination: wiz.destination || null,
+    record_video: document.getElementById('rec-video').checked,
+  };
   fetch('/api/validation/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})
     .then(r=>r.json()).then(d=>{
       if (d.error){ alert(d.error); return; }
@@ -477,7 +523,7 @@ function startRecording() {
 }
 
 // ════ Status poll + live summary ════
-let recStart = null;
+let recStart = null, labelCamReady = false, seatsSeeded = false;
 function pollStatus() {
   fetch('/api/validation/status').then(r=>r.json()).then(s=>{
     const badge = document.getElementById('rec-badge');
@@ -486,21 +532,41 @@ function pollStatus() {
     if (s.active) {
       badge.classList.remove('hidden'); badge.classList.add('flex');
       if (recStart==null) recStart = Date.now();
+      liveSessionId = s.session_id;
       const f = Object.values(s.frames||{}).reduce((a,b)=>a+b,0);
       const seg = Object.values(s.segments||{}).reduce((a,b)=>a+b,0);
       document.getElementById('rec-frames').textContent = `· ${s.session_id}`;
       const run = s.run||{};
+      const isCommon = s.session_type === 'common';
+      const video = s.record_video !== false;
       document.getElementById('live-cards').innerHTML = [
-        ['Soggetto', run.subject_label || '—'], ['Condizione', run.preset_id || '—'],
-        ['Destinazione', (s.destination&&s.destination.root) ? s.destination.root.split(/[\\\/]/).slice(-2).join('/') : 'interno'],
-        ['Frame · segmenti', `${f} · ${seg}`],
+        isCommon ? ['Posti dichiarati', (s.seating||[]).length || '—'] : ['Soggetto', run.subject_label || '—'],
+        ['Condizione', run.preset_id || '—'],
+        ['Video', video ? `sì · ${seg} seg` : 'no (no images)'],
+        ['Frame', `${f}`],
       ].map(([k,v])=>`<div class="bg-gray-950 rounded-xl px-3 py-2"><div class="text-[10px] text-gray-500 uppercase">${k}</div><div class="font-semibold truncate">${esc(v)}</div></div>`).join('');
       const el = Math.floor((Date.now()-recStart)/1000);
       document.getElementById('live-elapsed').textContent = `${String(Math.floor(el/60)).padStart(2,'0')}:${String(el%60).padStart(2,'0')}`;
-      if (run.subject_label) document.getElementById('live-subject').value = run.subject_label;
-      if (run.preset_id) document.getElementById('live-preset').value = run.preset_id;
+      // Branch the live controls by session type.
+      document.getElementById('crossing-live').classList.toggle('hidden', isCommon);
+      document.getElementById('common-live').classList.toggle('hidden', !isCommon);
+      if (isCommon) {
+        if (!seatsSeeded) { seats = subjectLabels(); seatsSeeded = true; renderSeats(); }
+        if (!labelCamReady) {
+          const cams = Object.keys(s.frames||{});
+          if (cams.length) {
+            document.getElementById('label-cam').innerHTML = cams.map(c=>`<option value="${esc(c)}">camera ${esc(c)}</option>`).join('');
+            labelCam = cams[0]; document.getElementById('label-stream').src = `/stream/${encodeURIComponent(labelCam)}`;
+            labelCamReady = true; startLiveLabel();
+          }
+        }
+      } else {
+        if (run.subject_label) document.getElementById('live-subject').value = run.subject_label;
+        if (run.preset_id) document.getElementById('live-preset').value = run.preset_id;
+      }
     } else {
       badge.classList.add('hidden'); badge.classList.remove('flex'); recStart = null;
+      stopLiveLabel(); labelCamReady = false; seatsSeeded = false; seats = []; liveSessionId = null;
     }
   }).catch(()=>{});
 }
@@ -515,6 +581,83 @@ function applyRun() {
 }
 function stopSession() {
   fetch('/api/validation/stop', {method:'POST'}).then(r=>r.json()).then(()=>{ pollStatus(); refreshSessions(); });
+}
+
+// ════ Common session: seating map (automatic GT) ════
+let seats = [];
+function seatRow(i){
+  const opts = '<option value="">— soggetto —</option>'+subjectLabels().map(l=>`<option value="${l}" ${seats[i]===l?'selected':''}>${l}</option>`).join('');
+  return `<div class="flex items-center gap-2">
+     <span class="text-xs text-gray-500 w-10">#${i+1}</span>
+     <select class="fld flex-1" onchange="seats[${i}]=this.value">${opts}</select>
+     <button onclick="rmSeat(${i})" class="text-gray-600 hover:text-red-400 text-xs">✕</button></div>`;
+}
+function renderSeats(){
+  document.getElementById('seat-rows').innerHTML = seats.length
+    ? seats.map((_,i)=>seatRow(i)).join('')
+    : '<div class="text-[11px] text-gray-600">Nessun posto. Aggiungi i posti nell\'ordine sinistra→destra, fila per fila.</div>';
+}
+function addSeat(){ seats.push(''); renderSeats(); }
+function rmSeat(i){ seats.splice(i,1); renderSeats(); }
+function applySeating(){
+  const payload = seats.map((label,idx)=>({seat:idx+1, label})).filter(s=>s.label);
+  fetch('/api/validation/seating', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({seats:payload})})
+    .then(r=>r.json()).then(d=>{ const m=document.getElementById('seat-msg');
+      m.textContent = d.error ? '⚠ '+d.error : `✓ ${(d.seating||[]).length} posti applicati`;
+      setTimeout(()=>m.textContent='',2500); });
+}
+
+// ════ Common session: live click-to-assign (correction) ════
+let liveSessionId = null, labelCam = null, labelTimer = null, liveFrameIndex = null, pendingFace = null;
+function startLiveLabel(){ if (!labelTimer) labelTimer = setInterval(pollLive, 250); }
+function stopLiveLabel(){ if (labelTimer){ clearInterval(labelTimer); labelTimer = null; } }
+function restartLiveLabel(){
+  labelCam = document.getElementById('label-cam').value || null;
+  if (labelCam) document.getElementById('label-stream').src = `/stream/${encodeURIComponent(labelCam)}`;
+  pendingFace = null; document.getElementById('label-picker').classList.add('hidden');
+}
+function pollLive(){
+  if (!labelCam) return;
+  fetch(`/api/validation/live/${encodeURIComponent(labelCam)}`).then(r=>r.json()).then(s=>{
+    if (!s.active){ stopLiveLabel(); return; }
+    liveFrameIndex = s.frame_index; drawLiveBoxes(s.faces||[]);
+  }).catch(()=>{});
+}
+function drawLiveBoxes(faces){
+  const img = document.getElementById('label-stream'), ov = document.getElementById('label-overlay');
+  if (!img.naturalWidth){ ov.innerHTML=''; return; }
+  const sx = img.clientWidth/img.naturalWidth, sy = img.clientHeight/img.naturalHeight;
+  ov.innerHTML = faces.map(f=>{
+    const [top,right,bottom,left] = f.bbox;
+    return `<div class="absolute border-2 border-sky-400/80 rounded cursor-pointer hover:border-emerald-400"
+       style="left:${left*sx}px;top:${top*sy}px;width:${(right-left)*sx}px;height:${(bottom-top)*sy}px;pointer-events:auto"
+       onclick="selectFace(${f.face_id})"></div>`;
+  }).join('');
+}
+function selectFace(faceId){
+  pendingFace = { camera_id: labelCam, frame_index: liveFrameIndex, face_id: faceId };
+  const pick = document.getElementById('label-picker');
+  pick.classList.remove('hidden');
+  pick.innerHTML = `<span class="text-[11px] text-gray-500 self-center mr-1">volto #${faceId} @frame ${liveFrameIndex}:</span>` +
+    subjectLabels().map(l=>`<button class="truth-btn" onclick="postLiveLabel('${l}')">${l}</button>`).join('');
+}
+function subjectTruthLocal(label){
+  const e = subjects.enrolled.find(x=>x.label===label);
+  if (e) return e.person_id!=null ? {true_person_id:e.person_id} : null;
+  if (subjects.unknown.some(x=>x.label===label)) return {non_mate:true};
+  return null;
+}
+function postLiveLabel(label){
+  if (!pendingFace || !liveSessionId) return;
+  const gt = subjectTruthLocal(label);
+  const m = document.getElementById('label-msg');
+  if (!gt){ m.textContent = '⚠ soggetto non valido'; return; }
+  fetch(`/api/validation/${encodeURIComponent(liveSessionId)}/labels`, {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({...pendingFace, ...gt})})
+    .then(r=>r.json()).then(d=>{
+      m.textContent = d.error ? '⚠ '+d.error : `✓ ${label} → volto #${pendingFace.face_id}`;
+      setTimeout(()=>m.textContent='',2500);
+      document.getElementById('label-picker').classList.add('hidden'); pendingFace=null; });
 }
 
 loadConfig(); detectDrives(); showStep();

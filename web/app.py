@@ -350,11 +350,13 @@ def validation_start():
             .order_by(Person.name)
             .all()
         ]
+    record_video = data.get("record_video")
     try:
         info = validation_manager.start(
             name, enrolled, _settings.match_threshold,
             session_type=data.get("session_type", "crossing"),
             destination=(data.get("destination") or None),
+            record_video=(None if record_video is None else bool(record_video)),
         )
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 409
@@ -371,6 +373,25 @@ def validation_set_run():
     except (RuntimeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify(ctx)
+
+
+@app.route("/api/validation/seating", methods=["POST"])
+def validation_seating():
+    """Declare the seating map for a common session (no-video automatic ground truth):
+    an ordered list of {seat, label} positions, left→right then row by row."""
+    data = request.get_json(silent=True) or {}
+    seats = data.get("seats") or data.get("seating") or []
+    try:
+        result = validation_manager.set_seating_map(seats)
+    except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result)
+
+
+@app.route("/api/validation/live/<camera_id>")
+def validation_live(camera_id: str):
+    """Latest processed frame's boxes for live click-to-assign (metadata only, no image)."""
+    return jsonify(validation_manager.live_detections(camera_id))
 
 
 @app.route("/api/validation/stop", methods=["POST"])
