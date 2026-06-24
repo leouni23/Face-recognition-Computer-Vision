@@ -13,7 +13,8 @@ from flask import Flask, Response, jsonify, request, send_from_directory, stream
 from loguru import logger
 
 from config.settings import get_settings
-from core.detector import detect_and_encode
+from core.detector import detect_and_encode, reset_for_profile_change
+from core.profile import OPTIMIZED, STANDARD, get_profile, profile_summary
 from core.geometry import compute_homography, solve_polar_calibration
 from core.validation import validation_manager, validation_root
 from core.validation_metrics import compute_and_export
@@ -419,6 +420,20 @@ def validation_sessions():
     return jsonify(out)
 
 
+@app.route("/api/validation/compare")
+def validation_compare():
+    """Offline Phase-1 (Standard) vs Phase-2 (Optimized-TX2) comparison, recomputed from the
+    saved JSONL of all sessions (no camera). `?by_preset=1` also splits by condition preset;
+    `?format=csv` returns the per-profile CSV for the paper."""
+    from core.compare import compare, to_csv
+    by_preset = request.args.get("by_preset") in ("1", "true", "yes")
+    result = compare(by_preset=by_preset)
+    if request.args.get("format") == "csv":
+        return Response(to_csv(result), mimetype="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=phase_comparison.csv"})
+    return jsonify(result)
+
+
 @app.route("/api/validation/<session_id>/session")
 def validation_session(session_id: str):
     """The session manifest (gallery, platform, threshold, cameras) for the review UI."""
@@ -581,6 +596,26 @@ def set_match_threshold():
     persisted = _persist_env("MATCH_THRESHOLD", f"{value}")
     logger.info(f"[Settings] MATCH_THRESHOLD = {value} (persistita nel .env: {persisted})")
     return jsonify({"value": value, "persisted": persisted})
+
+
+@app.route("/api/settings/profile", methods=["GET", "POST"])
+def settings_profile():
+    """Get or set the performance profile (Standard vs Optimized-TX2). On POST: persist
+    PERFORMANCE_PROFILE, apply it live, and rebuild the analyzer (new model pack / providers)
+    + drop optimized per-camera state — no full restart needed."""
+    if request.method == "GET":
+        return jsonify({"options": [STANDARD, OPTIMIZED], **profile_summary()})
+    data = request.get_json(silent=True) or {}
+    value = (data.get("profile") or "").strip().lower()
+    if value not in (STANDARD, OPTIMIZED):
+        return jsonify({"error": f"Profilo non valido (usa {STANDARD} o {OPTIMIZED})"}), 400
+    get_settings().performance_profile = value  # live update (read by get_profile())
+    reset_for_profile_change()                  # rebuild InsightFace with the new pack/providers
+    if broadcaster.pipeline is not None:
+        broadcaster.pipeline.force_reload()     # clear optimized per-camera caches/trackers
+    persisted = _persist_env("PERFORMANCE_PROFILE", value)
+    logger.info(f"[Settings] PERFORMANCE_PROFILE = {value} (persistito nel .env: {persisted})")
+    return jsonify({"persisted": persisted, **profile_summary()})
 
 
 def _segments_index(d: Path, camera_id: str) -> list:

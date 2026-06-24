@@ -1,11 +1,16 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
-from sqlalchemy.orm import DeclarativeBase, relationship
 
+try:  # SQLAlchemy 2.0 (x86)
+    from sqlalchemy.orm import DeclarativeBase, relationship
 
-class Base(DeclarativeBase):
-    pass
+    class Base(DeclarativeBase):
+        pass
+except ImportError:  # SQLAlchemy 1.4 (Jetson / Python 3.6 backport)
+    from sqlalchemy.orm import declarative_base, relationship
+
+    Base = declarative_base()
 
 
 class Person(Base):

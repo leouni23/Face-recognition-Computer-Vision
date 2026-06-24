@@ -36,6 +36,38 @@
     </nav>
   </header>
 
+  <!-- Config bar: performance profile (Standard vs Optimized-TX2) + camera sources -->
+  <div class="flex flex-wrap items-center gap-3 px-6 py-2 border-b border-gray-800/60 bg-gray-950/40 text-xs">
+    <span class="text-gray-500 uppercase tracking-widest font-semibold">Profilo prestazioni</span>
+    <div class="inline-flex rounded-lg overflow-hidden border border-gray-700">
+      <button id="prof-standard" onclick="setProfile('standard')" class="px-3 py-1 bg-gray-800 hover:bg-gray-700">Standard</button>
+      <button id="prof-optimized-tx2" onclick="setProfile('optimized-tx2')" class="px-3 py-1 bg-gray-800 hover:bg-gray-700 border-l border-gray-700">Optimized-TX2</button>
+    </div>
+    <span id="prof-detail" class="text-gray-500"></span>
+    <span id="cam-sources" class="ml-auto text-gray-600"></span>
+  </div>
+  <script>
+    function renderProfile(p){
+      const on='bg-emerald-600 text-white', off='bg-gray-800 hover:bg-gray-700';
+      ['standard','optimized-tx2'].forEach(k=>{
+        const b=document.getElementById('prof-'+k); if(!b) return;
+        const sel = p.profile===k;
+        b.className = `px-3 py-1 ${sel?on:off}` + (k==='optimized-tx2'?' border-l border-gray-700':'');
+      });
+      document.getElementById('prof-detail').textContent =
+        p.profile==='optimized-tx2'
+          ? `pack ${p.model_pack} · ${p.precision} · ${p.det_size?p.det_size.join('×'):'full'} · skip ${p.frame_skip} · tracker ${p.tracker?'on':'off'} · batch ${p.batch_embed?'on':'off'}`
+          : `${p.model_pack} · FP32 · comportamento standard`;
+    }
+    function loadProfile(){ fetch('/api/settings/profile').then(r=>r.json()).then(renderProfile).catch(()=>{}); }
+    function setProfile(v){
+      fetch('/api/settings/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:v})})
+        .then(r=>r.json()).then(p=>{ if(p.error){alert(p.error);return;} renderProfile(p); });
+    }
+    fetch('/api/cameras').then(r=>r.json()).then(c=>{document.getElementById('cam-sources').textContent='Camere: '+(c||[]).join(', ');}).catch(()=>{});
+    loadProfile();
+  </script>
+
   <main class="flex-1 p-5 grid grid-cols-1 xl:grid-cols-3 gap-5">
 
     <!-- Left: camera feeds (span 2 on xl) -->

@@ -1,61 +1,77 @@
 # syntax=docker/dockerfile:1
 #
-# Face ID — Jetson (ARM64 / L4T). DA COSTRUIRE ED ESEGUIRE SUL DEVICE.
+# Face ID — Jetson TX2 (ARM64 / L4T r32.7 / JetPack 4.6 / CUDA 10.2 / Python 3.6).
+# DA COSTRUIRE ED ESEGUIRE SUL DEVICE.
 #
-# Si parte da un'immagine jetson-containers (dusty-nv) che include GIÀ, compilati per la
-# tua L4T, CUDA + cuDNN + onnxruntime (GPU) + numpy + OpenCV. Qui aggiungiamo solo il
-# codice app e le dipendenze pure-Python mancanti (Flask, SQLAlchemy, InsightFace, …).
-# onnxruntime/opencv/numpy NON vengono reinstallati: si usano quelli del base (le uniche
-# build ARM/L4T che funzionano davvero su Jetson — i wheel pip x86 non valgono).
+# Immagine UNICA e size-budgeted (~<3–4 GB): un solo container, profilo selezionabile a runtime
+# (Standard / Optimized-TX2). NON impacchetta CUDA/cuDNN/TensorRT né i modelli:
+#   • CUDA/cuDNN/TensorRT  → montati dall'host dal runtime NVIDIA (`--runtime nvidia`).
+#   • Modelli InsightFace + engine TensorRT → scaricati/costruiti al primo avvio sul DISCO ESTERNO
+#     montato su /data (mai nell'immagine, mai sull'eMMC).
 #
-#   Jetson TX2  (JetPack 4.6 / L4T r32.7, CUDA 10.2, Python 3.6):
-#     docker build -f Dockerfile.jetson -t faceid:jetson-tx2 \
-#       --build-arg BASE_IMAGE=dustynv/onnxruntime:r32.7.1 .
+#   Build (sul TX2):
+#     sudo docker build -f Dockerfile.jetson -t faceid:jetson-tx2 \
+#       --build-arg ONNXRUNTIME_WHEEL_URL=<url wheel onnxruntime-gpu cp36 per JP4.6> .
+#   (Il wheel cp36 aarch64 per JP4.6 viene dal Jetson Zoo / dustynv — vedi README. Senza TRT EP
+#    l'app ripiega su CUDA, segnalato nei log.)
 #
-#   Jetson Orin (JetPack 6 / L4T r36, CUDA 12, Python 3.10):
-#     docker build -f Dockerfile.jetson -t faceid:jetson-orin \
-#       --build-arg BASE_IMAGE=dustynv/onnxruntime:r36.2.0 .
-#
-#   Esecuzione (sul device, runtime NVIDIA):
-#     docker run --runtime nvidia -p 8000:8000 \
-#       -e BIOMETRIC_SECRET_KEY=<hex> -e DATABASE_URL=sqlite:////data/face_id.db \
-#       -v faceid-data:/data -v faceid-models:/root/.insightface \
-#       --device /dev/video0 faceid:jetson-tx2
-#
-# Suggerimento: `jetson-containers run --autotag onnxruntime` individua il tag base
-# compatibile con la L4T installata; vedi README per la procedura completa.
+#   Run: usa docker-compose.jetson.yml (monta /data e la camera, --runtime nvidia).
 
-ARG BASE_IMAGE=dustynv/onnxruntime:r36.2.0
-FROM ${BASE_IMAGE}
+ARG BASE_IMAGE=nvcr.io/nvidia/l4t-base:r32.7.1
 
-ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+# ─────────────── builder: prepara un venv con solo le ruote runtime ───────────────
+FROM ${BASE_IMAGE} AS builder
+ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1
+ARG ONNXRUNTIME_WHEEL_URL=""
 
-# FFMPEG (RTSP) + librerie OpenCV runtime + curl (healthcheck). build-essential per le
-# eventuali estensioni che pip deve compilare su ARM (InsightFace/Cython).
+# Build-essential + dev headers servono SOLO qui (estensioni cffi/Cython di cryptography/InsightFace).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg libgl1 libglib2.0-0 curl python3-pip build-essential python3-dev \
+        python3 python3-venv python3-dev python3-pip build-essential \
+        libssl-dev libffi-dev wget ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+COPY requirements-jetson.txt .
+RUN pip install --upgrade pip wheel && \
+    pip install -r requirements-jetson.txt && \
+    if [ -n "$ONNXRUNTIME_WHEEL_URL" ]; then \
+        wget -q "$ONNXRUNTIME_WHEEL_URL" -O /tmp/ort.whl && pip install /tmp/ort.whl && rm /tmp/ort.whl ; \
+    else echo "ATTENZIONE: ONNXRUNTIME_WHEEL_URL non impostato — installa il wheel onnxruntime-gpu JP4.6 a mano" ; fi && \
+    find /opt/venv -type d -name '__pycache__' -prune -exec rm -rf {} + && \
+    find /opt/venv -type d -name 'tests' -prune -exec rm -rf {} + && \
+    find /opt/venv -name '*.pyc' -delete
+
+# ─────────────── runner: solo runtime, niente toolchain ───────────────
+FROM ${BASE_IMAGE} AS runner
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
+
+# Runtime minimale: python3 (per il venv) + ffmpeg (RTSP) + glib (opencv-headless) + curl (healthcheck).
+# NIENTE libgl/GUI: usiamo opencv-python-headless.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 ffmpeg libglib2.0-0 libgomp1 curl tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
 WORKDIR /app
-
-# Installa SOLO le dipendenze non già fornite dal base jetson-containers.
-# Escludi onnxruntime / opencv-python / numpy / psycopg2 (dal base o non necessari su SQLite).
-COPY requirements.txt .
-RUN python3 -m pip install --upgrade pip && \
-    grep -vE '^(onnxruntime|opencv-python|numpy|psycopg2)' requirements.txt > /tmp/req.txt && \
-    python3 -m pip install -r /tmp/req.txt
-
 COPY . .
 
-# Cache modelli InsightFace nella home di root (l'utente del base è root)
+# Tutto su /data (disco esterno): DB, modelli, engine TRT, validazione. Niente sull'eMMC.
 ENV DATA_DIR=/data \
     DATABASE_URL=sqlite:////data/face_id.db \
+    INSIGHTFACE_HOME=/data/models \
+    TRT_ENGINE_CACHE_DIR=/data/engines \
     USE_GPU=true \
+    PERFORMANCE_PROFILE=standard \
     LOG_LEVEL=INFO
-RUN mkdir -p /data /root/.insightface
+# InsightFace cerca i pack in ~/.insightface: puntiamo la home al disco esterno.
+RUN mkdir -p /data && ln -sf /data/models /root/.insightface
 
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
     CMD curl -fsS http://localhost:8000/api/cameras || exit 1
 
 CMD ["python3", "main.py", "--web", "--host", "0.0.0.0"]

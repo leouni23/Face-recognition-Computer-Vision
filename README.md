@@ -109,48 +109,58 @@ La Web UI è su **[http://localhost:8000](http://localhost:8000)**. DB SQLite, m
 
 ---
 
-### 🤖 Jetson TX2 / Orin Nano — Docker (build **sul device**)
+### 🤖 Jetson TX2 — immagine unica + profilo prestazioni (build **sul device**)
 
-> ⚠️ **Si costruisce ed esegue SUL Jetson.** Le immagini ARM64 dipendono dalle librerie L4T/CUDA del device (montate a runtime con `--runtime nvidia`). Il cross-build su x86 (buildx/QEMU) **non** produce un'immagine funzionante. Su Jetson si usa **[`Dockerfile.jetson`](Dockerfile.jetson)**, che parte da una base **[jetson-containers](https://github.com/dusty-nv/jetson-containers)** (`dustynv/onnxruntime:<L4T>`) con CUDA + cuDNN + onnxruntime + OpenCV **già compilati per la tua L4T** — i wheel pip `onnxruntime-gpu`/`opencv-python` x86 **non** funzionano su Jetson.
+> ⚠️ **Si costruisce ed esegue SUL Jetson.** Le librerie CUDA/cuDNN/TensorRT arrivano dall'host col runtime NVIDIA (`--runtime nvidia`) — **non** sono nell'immagine. Il cross-build su x86 (buildx/QEMU) non vale: builda sul device.
 
-**1 · Verifica la tua versione L4T** sul device:
+**Una sola immagine** ([`Dockerfile.jetson`](Dockerfile.jetson)) contiene **due profili** commutabili a runtime dalla dashboard (barra in alto) o da `PERFORMANCE_PROFILE`:
+
+| Profilo | Cosa fa |
+| --- | --- |
+| **Standard** (Fase 1) | modelli e pipeline attuali, invariati (`buffalo_l`, FP32/CUDA). |
+| **Optimized-TX2** (Fase 2) | FP16/**TensorRT** (engine on-device, cache su `/data/engines`), pack leggero `buffalo_s`, downsampling, frame-skip, tracker, batch-embedding. |
+
+Immagine **size-budgeted (< 3–4 GB)**: base `nvcr.io/nvidia/l4t-base:r32.7.1` (niente CUDA dentro), multi-stage, `opencv-python-headless`, wheel `onnxruntime-gpu` prebuilt per JP4.6, **modelli ed engine NON inclusi** (scaricati/costruiti al primo avvio su `/data`). Tutti i dati e le cache stanno sul **disco esterno** montato su `/data`; sull'eMMC restano solo OS e l'immagine.
+
+**1 · Prerequisiti.** JetPack 4.6 (L4T r32.7); runtime NVIDIA per Docker (`/etc/docker/daemon.json` → `"default-runtime": "nvidia"`, poi `sudo systemctl restart docker`); massime prestazioni:
 
 ```bash
-cat /etc/nv_tegra_release      # es. "R32 (release), REVISION: 7.1" → L4T r32.7  (TX2, JetPack 4.6)
-                               #     "R36 (release), REVISION: 2.0" → L4T r36.2  (Orin,  JetPack 6)
+sudo nvpmodel -m 0 && sudo jetson_clocks
 ```
 
-**2 · Abilita il runtime NVIDIA per Docker** (una volta sola): in `/etc/docker/daemon.json` imposta `"default-runtime": "nvidia"` e `sudo systemctl restart docker`.
+**2 · Monta il disco esterno** (modelli, engine, validazione, DB). Esempio (disco già formattato):
 
-**3 · Builda ed esegui** (scegli il tag base in base alla tua L4T):
+```bash
+sudo mkdir -p /mnt/faceid && sudo mount /dev/sda1 /mnt/faceid   # ext4 consigliato
+# FAT32/exFAT/NTFS: vedi DOCUMENTAZIONE §11.2. Niente dati sull'eMMC.
+```
+
+**3 · Procurati il wheel onnxruntime-gpu cp36 per JP4.6** dal [Jetson Zoo](https://elinux.org/Jetson_Zoo#ONNX_Runtime) / dustynv e prendi l'URL (`onnxruntime_gpu-*-cp36-*aarch64.whl`).
+
+**4 · Builda ed esegui** (sul TX2):
 
 ```bash
 git clone https://github.com/leouni23/Face-recognition-Computer-Vision.git
 cd Face-recognition-Computer-Vision
 
-# --- Jetson TX2  (JetPack 4.6 / L4T r32.7, CUDA 10.2) ---
-sudo docker build -f Dockerfile.jetson -t faceid:jetson-tx2 \
-  --build-arg BASE_IMAGE=dustynv/onnxruntime:r32.7.1 .
+EXT_DISK=/mnt/faceid \
+ONNXRUNTIME_WHEEL_URL=<url-wheel-cp36-JP4.6> \
+BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
+PERFORMANCE_PROFILE=standard \
+  sudo -E docker compose -f docker-compose.jetson.yml up --build
 
-# --- Jetson Orin (JetPack 6 / L4T r36, CUDA 12) ---
-sudo docker build -f Dockerfile.jetson -t faceid:jetson-orin \
-  --build-arg BASE_IMAGE=dustynv/onnxruntime:r36.2.0 .
-
-# Avvio (sostituisci il tag con quello che hai buildato)
-sudo docker run --runtime nvidia -p 8000:8000 \
-  -e BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
-  -v faceid-data:/data -v faceid-models:/root/.insightface \
-  --device /dev/video0 faceid:jetson-tx2
+sudo docker images faceid:jetson-tx2   # verifica la dimensione dell'immagine (< 3–4 GB)
 ```
 
-💡 **Trovare il tag base giusto:** se i tag sopra non combaciano con la tua L4T, installa `jetson-containers` e lascia che lo trovi lui, poi passa quel tag a `--build-arg BASE_IMAGE=...`:
+Apri **[http://localhost:8000](http://localhost:8000)** → in alto scegli **Standard** o **Optimized-TX2**. Il primo avvio in Optimized costruisce l'engine TensorRT in `/data/engines` (può richiedere qualche minuto, poi è in cache). I dati di validazione vanno in `/data/validation/<sessione>_<profilo>/` — ogni run è una cartella nuova, mai sovrascritta.
+
+**Confronto Fase 1 vs Fase 2** (offline, dai dati salvati, senza ri-accendere le camere):
 
 ```bash
-git clone https://github.com/dusty-nv/jetson-containers && bash jetson-containers/install.sh
-jetson-containers run --autotag onnxruntime   # individua l'immagine onnxruntime compatibile con la tua L4T
+python scripts/compare_sessions.py --json phase.json --csv phase.csv   # oppure il bottone "Confronta" in /validation
 ```
 
-> ℹ️ **Nota TX2 (L4T r32.7, Python 3.6):** lo stack scientifico richiesto da InsightFace (scikit-image, scipy) su Python 3.6 ARM può richiedere build lunghe. Se `pip` fallisce su una dipendenza, parti da una base jetson-containers più completa (es. `dustynv/l4t-ml:r32.7.1`, che include già numpy/scipy/scikit) passandola come `BASE_IMAGE`. Le immagini Jetson vanno comunque verificate sul device.
+> ℹ️ **Nota Python 3.6 (TX2).** L'immagine usa `requirements-jetson.txt` (pin compatibili 3.6: Flask 2.0, SQLAlchemy 1.4, pydantic v1, …) con shim che mantengono il codice identico su x86. Lo stack scientifico (scipy/scikit-image/onnx) su ARM cp36 può richiedere build lunghe se manca il wheel; in tal caso vedi la nota in DOCUMENTAZIONE §11. Se `TensorrtExecutionProvider` non è disponibile nel wheel, l'app ripiega su CUDA (segnalato nei log dei provider attivi).
 
 ---
 

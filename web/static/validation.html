@@ -354,6 +354,17 @@
       <p id="metrics-note" class="text-[11px] text-gray-600"></p>
     </section>
 
+    <!-- ══ Confronto fasi: Standard vs Optimized-TX2 (offline, da dati salvati) ══ -->
+    <section class="space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Confronto fasi — Standard vs Optimized-TX2</h2>
+        <label class="text-[11px] text-gray-500 flex items-center gap-1"><input type="checkbox" id="cmp-by-preset" class="accent-sky-500"> per preset</label>
+        <button onclick="runCompare()" class="ml-auto px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-sm font-semibold">Confronta</button>
+        <a id="cmp-csv" href="/api/validation/compare?format=csv" class="text-xs text-emerald-400 hover:text-emerald-300">⬇ CSV</a>
+      </div>
+      <div id="cmp-out" class="text-xs text-gray-400">Ricalcola FPIR/FNIR/EER/Rank-1 da tutte le sessioni salvate, raggruppate per profilo — nessuna camera.</div>
+    </section>
+
   </main>
 
 <script>
@@ -701,6 +712,35 @@ function postLiveLabel(label){
       m.textContent = d.error ? '⚠ '+d.error : `✓ ${label} → volto #${pendingFace.face_id}`;
       setTimeout(()=>m.textContent='',2500);
       document.getElementById('label-picker').classList.add('hidden'); pendingFace=null; });
+}
+
+// ════ Phase comparison (Standard vs Optimized-TX2) — offline, from saved sessions ════
+function runCompare(){
+  const byPreset = document.getElementById('cmp-by-preset').checked;
+  document.getElementById('cmp-csv').href = '/api/validation/compare?format=csv' + (byPreset?'&by_preset=1':'');
+  const out = document.getElementById('cmp-out');
+  out.textContent = 'Calcolo…';
+  fetch('/api/validation/compare' + (byPreset?'?by_preset=1':'')).then(r=>r.json()).then(c=>{
+    const profs = c.profiles||{};
+    if (!Object.keys(profs).length){ out.textContent = 'Nessuna sessione trovata in '+esc(c.root||''); return; }
+    const fmt = v => (v==null?'—':(+v).toFixed(4));
+    const rows = Object.entries(profs).map(([name,e])=>{
+      const o=e.overall||{}, ct=o.counts||{};
+      return `<tr class="border-t border-gray-800"><td class="py-1 px-2 font-medium">${esc(name)}</td>
+        <td class="py-1 px-2 text-right">${e.sessions}</td>
+        <td class="py-1 px-2 text-right">${fmt(o.fpir)}</td><td class="py-1 px-2 text-right">${fmt(o.fnir)}</td>
+        <td class="py-1 px-2 text-right">${fmt(o.eer)}</td><td class="py-1 px-2 text-right">${fmt(o.rank1)}</td>
+        <td class="py-1 px-2 text-right">${ct.mate_events??'—'}/${ct.non_mate_events??'—'}</td></tr>`;
+    }).join('');
+    const d = c.deltas_optimized_minus_standard||{};
+    const deltaLine = (d.fpir!=null||d.fnir!=null)
+      ? `<div class="mt-2 text-gray-400">Δ (optimized − standard): FPIR ${fmt(d.fpir)} · FNIR ${fmt(d.fnir)} · EER ${fmt(d.eer)} · Rank-1 ${fmt(d.rank1)}</div>` : '';
+    out.innerHTML = `<table class="w-full text-xs tabular-nums"><thead class="text-gray-500"><tr>
+      <th class="py-1 px-2 text-left">Profilo</th><th class="py-1 px-2 text-right">Sess.</th>
+      <th class="py-1 px-2 text-right">FPIR</th><th class="py-1 px-2 text-right">FNIR</th>
+      <th class="py-1 px-2 text-right">EER</th><th class="py-1 px-2 text-right">Rank-1</th>
+      <th class="py-1 px-2 text-right">mate/non</th></tr></thead><tbody>${rows}</tbody></table>${deltaLine}`;
+  }).catch(()=>{ out.textContent='Errore nel confronto.'; });
 }
 
 loadConfig(); detectDrives(); showStep();

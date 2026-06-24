@@ -26,8 +26,14 @@ data/
 # User-uploaded floor plans (may depict real environments)
 web/static/maps/
 
-# Docs images not needed at runtime
+# Docs not needed at runtime (keep the image small)
 docs/
+*.md
+
+# Build/compose files (not needed inside the image)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
 
 # OS
 .DS_Store
