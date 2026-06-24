@@ -6,9 +6,8 @@ parameter overridable via the OPT_* settings. A single image flips between profi
 runtime; the active profile + its parameters are snapshotted into every validation session
 so Phase-1 (Standard) vs Phase-2 (Optimized) stay directly comparable offline.
 """
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 from config.settings import get_settings
 
@@ -16,8 +15,8 @@ STANDARD = "standard"
 OPTIMIZED = "optimized-tx2"
 
 
-@dataclass(frozen=True)
-class Profile:
+# NamedTuple (immutable, Python 3.6-compatible — `dataclasses` is 3.7+).
+class Profile(NamedTuple):
     name: str
     model_pack: str                      # InsightFace pack (e.g. buffalo_l / buffalo_s)
     precision: str                       # fp32 | fp16 | int8 (TensorRT, optimized only)

@@ -71,7 +71,7 @@ def _security_headers(resp: Response) -> Response:
 
 # ── Enrollment session (one at a time) ────────────────────────────────────────
 _enroll_lock = threading.Lock()
-_enroll_session: dict = {}  # {"name": str, "embeddings": list[np.ndarray], "required": int}
+_enroll_session: dict = {}  # {"name": str, "embeddings": List[np.ndarray], "required": int}
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────

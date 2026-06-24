@@ -26,6 +26,13 @@ PointPair = dict  # {"px": float, "py": float, "mx": float, "my": float}
 PolarSample = dict  # {"mx": float, "my": float, "x_norm": float, "h_px": float}
 
 
+def _ieee_remainder(x: float, m: float) -> float:
+    """IEEE 754 remainder of x wrt m (Python 3.6 has no math.remainder, added in 3.7).
+    Returns x - round(x/m)*m, in [-m/2, m/2]; round() is banker's rounding, matching the
+    round-half-to-even of math.remainder."""
+    return x - round(x / m) * m
+
+
 def compute_homography(points: List[PointPair]) -> np.ndarray:
     """Estimate the 3x3 homography from >=4 pixel<->map correspondences."""
     if len(points) < 4:
@@ -79,7 +86,7 @@ def solve_polar_calibration(cam: Tuple[float, float], samples: List[PolarSample]
         )
 
     # Unwrap bearings around the first sample so the linear fit is not broken by ±π wrap
-    beta = [beta[0] + math.remainder(b - beta[0], math.tau) for b in beta]
+    beta = [beta[0] + _ieee_remainder(b - beta[0], math.tau) for b in beta]
 
     u_arr, b_arr = np.array(u), np.array(beta)
     u_mean, b_mean = u_arr.mean(), b_arr.mean()

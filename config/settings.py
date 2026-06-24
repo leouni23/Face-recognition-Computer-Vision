@@ -57,6 +57,6 @@ class Settings(BaseSettings):
             env_file = ".env"
 
 
-@lru_cache
+@lru_cache(maxsize=None)
 def get_settings() -> Settings:
     return Settings()

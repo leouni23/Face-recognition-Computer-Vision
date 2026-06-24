@@ -72,21 +72,22 @@ def _combine_metrics(sessions: List[dict], preset: Optional[str] = None) -> Opti
     session dir and run the standard metric computation over the union."""
     tmp = Path(tempfile.mkdtemp(prefix="faceid_cmp_"))
     try:
-        with (tmp / "detections.jsonl").open("w", encoding="utf-8") as det, \
-             (tmp / "labels.jsonl").open("w", encoding="utf-8") as lab:
-            any_det = False
-            for s in sessions:
-                sid = s["session_id"]
-                sd = Path(s["dir"])
-                for rec in _read_jsonl(sd / "detections.jsonl"):
-                    if preset is not None and (rec.get("preset_id") or "none") != preset:
-                        continue
-                    rec["camera_id"] = f"{sid}::{rec.get('camera_id')}"  # avoid cross-session key clashes
-                    det.write(json.dumps(rec) + "\n")
-                    any_det = True
-                for rec in _read_jsonl(sd / "labels.jsonl"):
-                    rec["camera_id"] = f"{sid}::{rec.get('camera_id')}"
-                    lab.write(json.dumps(rec) + "\n")
+        # Nested with (not parenthesized multi-with — that syntax is 3.9+).
+        with (tmp / "detections.jsonl").open("w", encoding="utf-8") as det:
+            with (tmp / "labels.jsonl").open("w", encoding="utf-8") as lab:
+                any_det = False
+                for s in sessions:
+                    sid = s["session_id"]
+                    sd = Path(s["dir"])
+                    for rec in _read_jsonl(sd / "detections.jsonl"):
+                        if preset is not None and (rec.get("preset_id") or "none") != preset:
+                            continue
+                        rec["camera_id"] = f"{sid}::{rec.get('camera_id')}"  # avoid cross-session key clashes
+                        det.write(json.dumps(rec) + "\n")
+                        any_det = True
+                    for rec in _read_jsonl(sd / "labels.jsonl"):
+                        rec["camera_id"] = f"{sid}::{rec.get('camera_id')}"
+                        lab.write(json.dumps(rec) + "\n")
         if not any_det:
             return None
         return compute_session_metrics(tmp)

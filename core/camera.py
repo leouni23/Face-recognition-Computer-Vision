@@ -1,7 +1,7 @@
 import queue
 import time
 import threading
-from typing import Optional
+from typing import Optional, Union
 
 import cv2
 import numpy as np
@@ -25,7 +25,7 @@ class CameraStream:
         self.camera_id = camera_id or source
 
         self._cap = self._open()
-        self._queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=2)
+        self._queue = queue.Queue(maxsize=2)  # type: queue.Queue
         self._stop_event = threading.Event()
         self._thread = threading.Thread(
             target=self._capture_loop, daemon=True, name=f"cam-{self.camera_id}"
@@ -36,7 +36,7 @@ class CameraStream:
             cap = cv2.VideoCapture(self._source, cv2.CAP_FFMPEG)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         else:
-            src: int | str = int(self._source) if self._source.isdigit() else self._source
+            src: Union[int, str] = int(self._source) if self._source.isdigit() else self._source
             cap = cv2.VideoCapture(src)
 
         if not cap.isOpened():
