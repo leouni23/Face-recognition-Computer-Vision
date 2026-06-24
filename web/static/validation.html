@@ -114,10 +114,26 @@
         <div class="ml-auto flex items-center gap-1.5" id="step-dots"></div>
       </div>
 
-      <!-- Step 1 — destinazione -->
+      <!-- Step 1 — modalità (scelta esplicita, prima di tutto) -->
       <div data-step="1" class="wiz-step space-y-2">
-        <div class="text-sm font-semibold text-gray-300">1 · Destinazione dei dati</div>
-        <div class="text-[11px] text-gray-600">Dove salvare gli artefatti (video, log). Lascia vuoto per lo storage interno. Il database resta sempre interno.</div>
+        <div class="text-sm font-semibold text-gray-300">1 · Modalità</div>
+        <div class="text-[11px] text-gray-600">Scegli come stabilire la verità a terra. La scelta determina tutto il resto.</div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <button onclick="pickMode('mapping')" id="mode-mapping" class="truth-btn text-left !items-start flex-col gap-1 p-3">
+            <span class="font-semibold">🗺 Mappatura (senza video)</span>
+            <span class="text-[11px] text-gray-400 font-normal">Verità a terra dal vivo (soggetto dichiarato / mappa dei posti). <b>Nessuna immagine su disco.</b></span>
+          </button>
+          <button onclick="pickMode('video')" id="mode-video" class="truth-btn text-left !items-start flex-col gap-1 p-3">
+            <span class="font-semibold">🎥 Registrazione video (come prima)</span>
+            <span class="text-[11px] text-gray-400 font-normal">Video annotato + etichettatura manuale a posteriori. Salva immagini su disco.</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 2 — destinazione -->
+      <div data-step="2" class="wiz-step space-y-2 hidden">
+        <div class="text-sm font-semibold text-gray-300">2 · Destinazione dei dati</div>
+        <div class="text-[11px] text-gray-600">Dove salvare gli artefatti (log, ed eventuale video). Lascia vuoto per lo storage interno. Il database resta sempre interno.</div>
         <div class="flex flex-wrap items-center gap-2">
           <button onclick="detectDrives()" class="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-sm">🔄 Rileva dischi</button>
           <select id="drive-sel" class="fld" onchange="onDrivePick()"><option value="">— interno (default) —</option></select>
@@ -130,9 +146,9 @@
         <div id="dest-status" class="text-xs"></div>
       </div>
 
-      <!-- Step 2 — sessione -->
-      <div data-step="2" class="wiz-step space-y-2 hidden">
-        <div class="text-sm font-semibold text-gray-300">2 · Tipo e nome sessione</div>
+      <!-- Step 3 — sessione -->
+      <div data-step="3" class="wiz-step space-y-2 hidden">
+        <div class="text-sm font-semibold text-gray-300">3 · Tipo e nome sessione</div>
         <div class="flex flex-wrap gap-2">
           <button onclick="pickType('crossing')" id="type-crossing" class="truth-btn">Attraversamenti (singolo soggetto)</button>
           <button onclick="pickType('common')" id="type-common" class="truth-btn">Sessione comune (10 statici)</button>
@@ -140,35 +156,30 @@
         <input id="sess-name" class="fld w-full" placeholder="nome sessione (es. Sessione 1)" />
       </div>
 
-      <!-- Step 3 — soggetto -->
-      <div data-step="3" class="wiz-step space-y-2 hidden">
-        <div class="text-sm font-semibold text-gray-300">3 · Primo soggetto che attraversa</div>
+      <!-- Step 4 — soggetto (saltato per la sessione comune) -->
+      <div data-step="4" class="wiz-step space-y-2 hidden">
+        <div class="text-sm font-semibold text-gray-300">4 · Primo soggetto che attraversa</div>
         <div class="text-[11px] text-gray-600">La verità a terra è automatica dal soggetto dichiarato. Potrai cambiarlo tra un attraversamento e l'altro.</div>
         <div id="subject-pick" class="flex flex-wrap gap-1.5"></div>
       </div>
 
-      <!-- Step 4 — condizione -->
-      <div data-step="4" class="wiz-step space-y-2 hidden">
-        <div class="text-sm font-semibold text-gray-300">4 · Preset di condizione</div>
-        <select id="preset-pick" class="fld w-full"></select>
-        <div class="text-[11px] text-gray-600">Non c'è il preset giusto? Aggiungilo in ⚙ Configurazione, poi torna qui.</div>
+      <!-- Step 5 — condizione -->
+      <div data-step="5" class="wiz-step space-y-2 hidden">
+        <div class="text-sm font-semibold text-gray-300">5 · Preset di condizione</div>
+        <select id="preset-pick" class="fld w-full" onchange="onPresetPick()"></select>
+        <div class="text-[11px] text-gray-600">Seleziona un preset. Non c'è quello giusto? Aggiungilo in ⚙ Configurazione, poi torna qui.</div>
       </div>
 
-      <!-- Step 5 — conferma -->
-      <div data-step="5" class="wiz-step space-y-3 hidden">
-        <div class="text-sm font-semibold text-gray-300">5 · Conferma</div>
+      <!-- Step 6 — conferma -->
+      <div data-step="6" class="wiz-step space-y-3 hidden">
+        <div class="text-sm font-semibold text-gray-300">6 · Conferma</div>
         <div id="wiz-summary" class="bg-gray-950 rounded-xl p-3 text-sm space-y-1"></div>
-        <label class="flex items-center gap-2 bg-gray-950 rounded-xl p-3 text-sm cursor-pointer">
-          <input type="checkbox" id="rec-video" class="accent-emerald-500 w-4 h-4" />
-          <span>Registra video annotato</span>
-          <span class="text-[11px] text-gray-500 ml-1">— se spento: <b>nessuna immagine salvata su disco</b> (verità a terra dal vivo)</span>
-        </label>
         <button onclick="startRecording()" class="big-btn bg-emerald-600 hover:bg-emerald-500 w-full">● Avvia sessione</button>
       </div>
 
       <div class="flex items-center gap-2 pt-1 border-t border-gray-800/60">
         <button onclick="wizNav(-1)" id="wiz-back" class="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-sm disabled:opacity-40">← Indietro</button>
-        <button onclick="wizNav(1)" id="wiz-next" class="ml-auto px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-sm font-semibold">Avanti →</button>
+        <button onclick="wizNav(1)" id="wiz-next" class="ml-auto px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed">Avanti →</button>
       </div>
     </section>
 
@@ -215,6 +226,11 @@
           </div>
           <div id="label-picker" class="hidden flex flex-wrap gap-1.5 pt-1"></div>
         </div>
+      </div>
+
+      <!-- Common + video: posterior annotation happens in the review panel after stop -->
+      <div id="common-video-note" class="hidden bg-gray-950 rounded-xl p-3 text-sm text-gray-400">
+        🎥 Modalità <b>registrazione video</b>: il video annotato viene salvato. L'etichettatura della verità a terra si fa <b>a posteriori</b> nella <b>Revisione</b> qui sotto, dopo aver fermato la sessione (selezione evento → identità).
       </div>
 
       <button onclick="stopSession()" class="big-btn bg-red-600 hover:bg-red-500 w-full">■ Ferma sessione</button>
@@ -440,7 +456,28 @@ function saveSubjects() {
 function subjectLabels(){ return [...subjects.enrolled.map(e=>e.label), ...subjects.unknown.map(u=>u.label)]; }
 
 // ════ Wizard ════
-let wiz = { step:1, maxStep:5, destination:'', destOk:false, sessionType:'crossing', subjectLabel:'', presetId:'' };
+let wiz = { step:1, maxStep:6, recordVideo:null, modeOk:false, destination:'', destOk:false,
+            sessionType:'crossing', typeOk:true, subjectLabel:'', subjectOk:false, presetId:'', presetOk:false };
+function pickMode(m){
+  wiz.recordVideo = (m==='video'); wiz.modeOk = true;
+  ['mapping','video'].forEach(k=>{
+    const on = (k===m), b = document.getElementById('mode-'+k);
+    b.classList.toggle('ring-2', on); b.classList.toggle('ring-emerald-400', on);
+  });
+  updateNext();
+}
+function stepSatisfied(step){
+  switch(step){
+    case 1: return wiz.modeOk;                                  // modalità scelta
+    case 2: return wiz.destOk;                                  // destinazione validata
+    case 3: return wiz.typeOk;                                  // tipo sessione
+    case 4: return wiz.sessionType==='common' || wiz.subjectOk; // soggetto (saltato per comune)
+    case 5: return wiz.presetOk;                                // preset reale selezionato
+    default: return true;
+  }
+}
+function updateNext(){ document.getElementById('wiz-next').disabled = !stepSatisfied(wiz.step); }
+function onPresetPick(){ wiz.presetId = document.getElementById('preset-pick').value; wiz.presetOk = wiz.presetId !== ''; updateNext(); }
 function fillPresetPickers() {
   const opt = '<option value="">— nessuno —</option>'+presets.map(p=>`<option value="${p.preset_id}">${esc(p.name)}</option>`).join('');
   document.getElementById('preset-pick').innerHTML = opt;
@@ -461,47 +498,49 @@ function validateDest() {
   const path = document.getElementById('dest-path').value.trim();
   const minutes = +document.getElementById('dest-minutes').value || 0;
   const box = document.getElementById('dest-status');
-  if (!path) { wiz.destination=''; wiz.destOk=true; box.innerHTML='<span class="text-gray-400">Storage interno (default).</span>'; return; }
+  if (!path) { wiz.destination=''; wiz.destOk=true; box.innerHTML='<span class="text-gray-400">Storage interno (default).</span>'; updateNext(); return; }
   fetch('/api/storage/validate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path, minutes})})
     .then(r=>r.json()).then(v=>{
       wiz.destination = v.ok ? path : ''; wiz.destOk = v.ok;
       const errs = (v.errors||[]).map(e=>`<div class="text-red-400">✕ ${esc(e)}</div>`).join('');
       const warns = (v.warnings||[]).map(w=>`<div class="text-amber-400">⚠ ${esc(w)}</div>`).join('');
       box.innerHTML = `<div class="${v.ok?'text-emerald-400':'text-red-400'}">${v.ok?'✓ OK':'✗ non utilizzabile'} · ${esc(v.fs_class||'?')} · ${gb(v.free_bytes)} liberi</div>${errs}${warns}`;
+      updateNext();
     });
 }
 function pickType(t) {
-  wiz.sessionType = t;
+  wiz.sessionType = t; wiz.typeOk = true;
   document.getElementById('type-crossing').classList.toggle('ring-2', t==='crossing');
   document.getElementById('type-crossing').classList.toggle('ring-emerald-400', t==='crossing');
   document.getElementById('type-common').classList.toggle('ring-2', t==='common');
   document.getElementById('type-common').classList.toggle('ring-emerald-400', t==='common');
+  updateNext();
 }
-function pickSubject(l, el){ wiz.subjectLabel=l; document.querySelectorAll('#subject-pick .truth-btn').forEach(b=>b.classList.remove('ring-2','ring-emerald-400')); el.classList.add('ring-2','ring-emerald-400'); }
+function pickSubject(l, el){ wiz.subjectLabel=l; wiz.subjectOk=true; document.querySelectorAll('#subject-pick .truth-btn').forEach(b=>b.classList.remove('ring-2','ring-emerald-400')); el.classList.add('ring-2','ring-emerald-400'); updateNext(); }
 function stepEls(){ return [...document.querySelectorAll('.wiz-step')]; }
 function showStep() {
   stepEls().forEach(el=>el.classList.toggle('hidden', +el.dataset.step !== wiz.step));
   document.getElementById('wiz-back').disabled = wiz.step===1;
-  document.getElementById('wiz-next').classList.toggle('hidden', wiz.step===5);
-  // dots
-  document.getElementById('step-dots').innerHTML = [1,2,3,4,5].map(s=>`<span class="step-dot ${s===wiz.step?'on':''}"></span>`).join('');
-  if (wiz.step===5) renderWizSummary();
+  document.getElementById('wiz-next').classList.toggle('hidden', wiz.step===wiz.maxStep);
+  document.getElementById('step-dots').innerHTML = [1,2,3,4,5,6].map(s=>`<span class="step-dot ${s===wiz.step?'on':''}"></span>`).join('');
+  if (wiz.step===wiz.maxStep) renderWizSummary();
+  updateNext();
 }
 function wizNav(dir) {
+  if (dir>0 && !stepSatisfied(wiz.step)) return;            // sequenziale forzato: non saltare avanti
   let next = wiz.step + dir;
-  if (wiz.sessionType==='common' && next===3) next += dir; // skip subject for common
-  wiz.step = Math.max(1, Math.min(5, next));
+  if (wiz.sessionType==='common' && next===4) next += dir;  // salta il soggetto (step 4) per la comune
+  wiz.step = Math.max(1, Math.min(wiz.maxStep, next));
   showStep();
 }
 function renderWizSummary() {
   const p = presets.find(x=>x.preset_id===(wiz.presetId||document.getElementById('preset-pick').value));
-  const rv = document.getElementById('rec-video').checked;
   document.getElementById('wiz-summary').innerHTML = `
+    <div><span class="text-gray-500">Modalità:</span> ${wiz.recordVideo ? '🎥 registrazione video' : '<b class="text-emerald-400">🗺 mappatura — nessuna immagine su disco</b>'}</div>
     <div><span class="text-gray-500">Destinazione:</span> ${wiz.destination ? esc(wiz.destination) : 'interno (default)'}</div>
     <div><span class="text-gray-500">Tipo:</span> ${wiz.sessionType==='common'?'sessione comune':'attraversamenti'} · <b>${esc(document.getElementById('sess-name').value||'(senza nome)')}</b></div>
     ${wiz.sessionType==='crossing'?`<div><span class="text-gray-500">Primo soggetto:</span> ${esc(wiz.subjectLabel||'—')}</div>`:''}
-    <div><span class="text-gray-500">Condizione:</span> ${p?esc(p.name):'—'}</div>
-    <div><span class="text-gray-500">Video:</span> ${rv?'sì':'<b class="text-emerald-400">no — nessuna immagine su disco</b>'}</div>`;
+    <div><span class="text-gray-500">Condizione:</span> ${p?esc(p.name):'—'}</div>`;
 }
 function startRecording() {
   wiz.presetId = document.getElementById('preset-pick').value;
@@ -509,7 +548,7 @@ function startRecording() {
     name: document.getElementById('sess-name').value.trim(),
     session_type: wiz.sessionType,
     destination: wiz.destination || null,
-    record_video: document.getElementById('rec-video').checked,
+    record_video: !!wiz.recordVideo,
   };
   fetch('/api/validation/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})
     .then(r=>r.json()).then(d=>{
@@ -547,10 +586,14 @@ function pollStatus() {
       ].map(([k,v])=>`<div class="bg-gray-950 rounded-xl px-3 py-2"><div class="text-[10px] text-gray-500 uppercase">${k}</div><div class="font-semibold truncate">${esc(v)}</div></div>`).join('');
       const el = Math.floor((Date.now()-recStart)/1000);
       document.getElementById('live-elapsed').textContent = `${String(Math.floor(el/60)).padStart(2,'0')}:${String(el%60).padStart(2,'0')}`;
-      // Branch the live controls by session type.
+      // Branch the live controls by session type AND mode:
+      //  crossing → declared-subject selectors; common+mapping → seating + live labeling;
+      //  common+video → posterior annotation (done later in the review panel).
+      const mapping = isCommon && !video;
       document.getElementById('crossing-live').classList.toggle('hidden', isCommon);
-      document.getElementById('common-live').classList.toggle('hidden', !isCommon);
-      if (isCommon) {
+      document.getElementById('common-live').classList.toggle('hidden', !mapping);
+      document.getElementById('common-video-note').classList.toggle('hidden', !(isCommon && video));
+      if (mapping) {
         if (!seatsSeeded) { seats = subjectLabels(); seatsSeeded = true; renderSeats(); }
         if (!labelCamReady) {
           const cams = Object.keys(s.frames||{});
@@ -560,7 +603,7 @@ function pollStatus() {
             labelCamReady = true; startLiveLabel();
           }
         }
-      } else {
+      } else if (!isCommon) {
         if (run.subject_label) document.getElementById('live-subject').value = run.subject_label;
         if (run.preset_id) document.getElementById('live-preset').value = run.preset_id;
       }
