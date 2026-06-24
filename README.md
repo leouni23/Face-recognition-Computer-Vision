@@ -120,7 +120,7 @@ La Web UI è su **[http://localhost:8000](http://localhost:8000)**. DB SQLite, m
 | **Standard** (Fase 1) | modelli e pipeline attuali, invariati (`buffalo_l`, FP32/CUDA). |
 | **Optimized-TX2** (Fase 2) | FP16/**TensorRT** (engine on-device, cache su `/data/engines`), pack leggero `buffalo_s`, downsampling, frame-skip, tracker, batch-embedding. |
 
-Immagine **size-budgeted (< 3–4 GB)**: base `nvcr.io/nvidia/l4t-base:r32.7.1` (niente CUDA dentro), multi-stage, `opencv-python-headless`, wheel `onnxruntime-gpu` prebuilt per JP4.6, **modelli ed engine NON inclusi** (scaricati/costruiti al primo avvio su `/data`). Tutti i dati e le cache stanno sul **disco esterno** montato su `/data`; sull'eMMC restano solo OS e l'immagine.
+Base **`dustynv/onnxruntime:r32.7.1`**: porta già, compilati per L4T r32.7, **CUDA + cuDNN + onnxruntime-gpu + numpy + OpenCV** (gli unici build ARM/L4T che funzionano — i wheel pip x86 no). L'immagine aggiunge solo il codice e le dipendenze pure-Python di `requirements-jetson.txt` (pin Python 3.6). **Modelli ed engine NON inclusi** (scaricati/costruiti al primo avvio su `/data`). Tutti i dati e le cache stanno sul **disco esterno** montato su `/data`; sull'eMMC restano solo OS e immagine.
 
 **1 · Prerequisiti.** JetPack 4.6 (L4T r32.7); runtime NVIDIA per Docker (`/etc/docker/daemon.json` → `"default-runtime": "nvidia"`, poi `sudo systemctl restart docker`); massime prestazioni:
 
@@ -135,21 +135,19 @@ sudo mkdir -p /mnt/faceid && sudo mount /dev/sda1 /mnt/faceid   # ext4 consiglia
 # FAT32/exFAT/NTFS: vedi DOCUMENTAZIONE §11.2. Niente dati sull'eMMC.
 ```
 
-**3 · Procurati il wheel onnxruntime-gpu cp36 per JP4.6** dal [Jetson Zoo](https://elinux.org/Jetson_Zoo#ONNX_Runtime) / dustynv e prendi l'URL (`onnxruntime_gpu-*-cp36-*aarch64.whl`).
-
-**4 · Builda ed esegui** (sul TX2):
+**3 · Builda ed esegui** (sul TX2 — onnxruntime/CUDA arrivano dal base, niente wheel da procurare):
 
 ```bash
 git clone https://github.com/leouni23/Face-recognition-Computer-Vision.git
 cd Face-recognition-Computer-Vision
+git checkout feat/jetson-optimized-profile
 
 EXT_DISK=/mnt/faceid \
-ONNXRUNTIME_WHEEL_URL=<url-wheel-cp36-JP4.6> \
 BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
 PERFORMANCE_PROFILE=standard \
   sudo -E docker compose -f docker-compose.jetson.yml up --build
 
-sudo docker images faceid:jetson-tx2   # verifica la dimensione dell'immagine (< 3–4 GB)
+sudo docker images faceid:jetson-tx2   # dimensione immagine (il base dustynv è ampio: l'immagine non è "piccola")
 ```
 
 Apri **[http://localhost:8000](http://localhost:8000)** → in alto scegli **Standard** o **Optimized-TX2**. Il primo avvio in Optimized costruisce l'engine TensorRT in `/data/engines` (può richiedere qualche minuto, poi è in cache). I dati di validazione vanno in `/data/validation/<sessione>_<profilo>/` — ogni run è una cartella nuova, mai sovrascritta.

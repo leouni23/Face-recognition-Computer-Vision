@@ -1,32 +1,31 @@
-# ── Jetson TX2 / JetPack 4.6 (L4T r32.7, CUDA 10.2, Python 3.6) ────────────────────────────
-# Backport pins so the app runs on the TX2's Python 3.6 (the x86 requirements.txt needs ≥3.7/3.8).
-# The dual-version shims in config/settings.py (pydantic v1) and database/models.py (SQLAlchemy 1.4)
-# keep the SAME source working here and on x86 — the Standard profile is byte-for-byte on x86.
+# Jetson TX2 / JetPack 4.6 (L4T r32.7, CUDA 10.2, Python 3.6).
+# Backport pins so the app runs on the TX2 Python 3.6 (the x86 requirements.txt needs 3.7+/3.8+).
+# The dual-version shims in config/settings.py (pydantic v1) and database/models.py
+# (SQLAlchemy 1.4) keep the SAME source working here and on x86.
 #
-# IMPORTANT: onnxruntime-gpu is NOT pinned here — there is no PyPI aarch64 build for JP4.6. Install
-# the prebuilt cp36 wheel from the NVIDIA Jetson Zoo / dustynv in Dockerfile.jetson
-# (ARG ONNXRUNTIME_WHEEL_URL). opencv is the headless build (no GUI libs → smaller image).
+# ASCII-only file (no em-dash / box-drawing chars) to avoid the locale UnicodeDecodeError seen
+# on-device. numpy and opencv are NOT pinned here: they come prebuilt from the
+# dustynv/onnxruntime:r32.7.1 base image. onnxruntime-gpu also comes from that base.
 
-# Web + core (Python 3.6-compatible)
-flask==2.0.3
-Werkzeug==2.0.3
-Jinja2==3.0.3
-itsdangerous==2.0.1
-click==8.0.4
-MarkupSafe==2.0.1
-sqlalchemy==1.4.46
-pydantic==1.10.13            # v1 (no separate pydantic-settings; BaseSettings is built in)
-cryptography==3.3.2          # last pre-Rust release (builds via cffi + system OpenSSL, no Rust)
+# Web + core (Python 3.6 compatible)
+flask>=2.0,<2.1
+Werkzeug<2.1
+Jinja2<3.1
+itsdangerous<2.1
+click<8.1
+MarkupSafe<2.1
+SQLAlchemy>=1.4,<2.0
+pydantic==1.9.2          # v1: BaseSettings is built in (no pydantic-settings)
+cryptography==3.4.8      # cp36-abi3 aarch64 wheel available -> no Rust build
 loguru==0.6.0
 psutil==5.9.8
 
-# Vision stack (aarch64 cp36 wheels; heavy builds fall back to source — see README note)
-numpy==1.19.5               # last numpy for Python 3.6; matches the JP4.6 onnxruntime wheel
-opencv-python-headless==4.5.5.64
-onnx==1.10.2                # InsightFace model loading (aarch64 cp36 manylinux2014 wheel)
+# Face recognition (uses the base image numpy / opencv / onnxruntime)
 insightface==0.7.3
 
-# Optional Telegram alerts (text only). Pin a 3.6-compatible release; remove if unused.
+# Optional Telegram alerts (text only). 3.6 compatible pin; remove if unused.
 pyTelegramBotAPI==4.4.0
 
-# psycopg2 intentionally omitted — Jetson uses SQLite.
+# numpy, opencv-python*, onnxruntime, psycopg2: intentionally omitted.
+#   - numpy / opencv / onnxruntime: provided by the dustynv base (the only ARM/L4T builds that work).
+#   - psycopg2: Jetson uses SQLite.
