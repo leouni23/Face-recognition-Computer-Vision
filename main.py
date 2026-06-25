@@ -16,12 +16,12 @@ import numpy as np
 from loguru import logger
 
 from config.settings import get_settings
-from core.camera import CameraStream
+from core.camera_manager import camera_manager
 from core.pipeline import FaceIdPipeline, RecognitionResult
 from database.models import Base
 from database.session import engine, get_session
 from privacy.retention import run_retention
-from ui.display import Display, annotate_frame
+from ui.display import Display
 from web.broadcaster import broadcaster
 
 _settings = get_settings()
@@ -37,43 +37,6 @@ def _setup_logging() -> None:
         colorize=True,
         format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
     )
-
-
-def _worker(
-    cam: CameraStream,
-    pipeline: FaceIdPipeline,
-    result_queue: Optional["queue.Queue[_QueueItem]"],
-    stop_event: threading.Event,
-    web_mode: bool,
-) -> None:
-    while not stop_event.is_set():
-        frame = cam.read(timeout=0.1)
-        if frame is None:
-            continue
-
-        try:
-            results = pipeline.process_frame(frame, cam.camera_id)
-        except Exception:
-            # A bad frame or transient DB error must never kill the camera worker
-            logger.exception(f"Errore nel frame (camera {cam.camera_id}); continuo")
-            continue
-
-        if web_mode:
-            broadcaster.push_raw_frame(cam.camera_id, frame)
-            if broadcaster.has_viewers(cam.camera_id):
-                annotated = annotate_frame(frame, results)
-                broadcaster.push_frame(cam.camera_id, annotated)
-            for _, pid, name, conf in results:
-                if pid is not None:
-                    broadcaster.push_event(cam.camera_id, name, conf)
-
-        if result_queue is not None:
-            if result_queue.full():
-                try:
-                    result_queue.get_nowait()
-                except queue.Empty:
-                    pass
-            result_queue.put((cam.camera_id, frame, results))
 
 
 def _start_flask(host: str, port: int) -> None:
@@ -119,9 +82,11 @@ def main() -> None:
     if deleted:
         logger.info(f"Retention GDPR: {deleted} persona/e eliminate per scadenza dati")
 
-    cameras = [CameraStream(src).start() for src in _settings.cameras]
     pipeline = FaceIdPipeline()
     broadcaster.pipeline = pipeline
+
+    from core.detector import warmup as _warmup_models
+    threading.Thread(target=_warmup_models, daemon=True, name="model-warmup").start()
 
     from core.notifier import build_notifier, set_notifier
     notifier = build_notifier(_settings)
@@ -142,24 +107,11 @@ def main() -> None:
         info = validation_manager.start(args.validation, enrolled, _settings.match_threshold)
         logger.info(f"Validazione: sessione '{info['session_id']}' — registrazione attiva")
 
-    result_queues: Dict[str, "queue.Queue[_QueueItem]"] = (
-        {cam.camera_id: queue.Queue(maxsize=2) for cam in cameras}
-        if show_local else {}
-    )
+    # Camera lifecycle (registry-driven, hot-reloadable) is owned by the manager.
+    camera_manager.start_all(pipeline, web_mode=args.web, show_local=show_local)
+    result_queues = camera_manager.result_queues
 
     stop_event = threading.Event()
-    workers = [
-        threading.Thread(
-            target=_worker,
-            args=(cam, pipeline, result_queues.get(cam.camera_id), stop_event, args.web),
-            daemon=True,
-            name=f"worker-{cam.camera_id}",
-        )
-        for cam in cameras
-    ]
-    for w in workers:
-        w.start()
-
     if args.web:
         threading.Thread(
             target=_start_flask, args=(args.host, args.port), daemon=True
@@ -170,7 +122,7 @@ def main() -> None:
         mode.append("finestre locali")
     if args.web:
         mode.append(f"web http://{args.host}:{args.port}")
-    logger.info(f"Face ID avviato — {len(cameras)} camera/e — {', '.join(mode)}. Premi Q o Ctrl-C per uscire.")
+    logger.info(f"Face ID avviato — {len(result_queues) or 'N'} camera/e attive — {', '.join(mode)}. Premi Q o Ctrl-C per uscire.")
 
     display = Display() if show_local else None
 
@@ -193,8 +145,7 @@ def main() -> None:
         from core.validation import validation_manager
         if validation_manager.is_active():
             validation_manager.stop()
-        for cam in cameras:
-            cam.stop()
+        camera_manager.stop_all()
         Display.close_all()
         logger.info("Face ID terminato.")
 

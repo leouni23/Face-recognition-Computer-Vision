@@ -3,12 +3,14 @@ import time
 from collections import defaultdict, deque
 from typing import Deque, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 from loguru import logger
 
 from config.settings import get_settings
-from core.detector import FaceLocation, detect_and_encode
+from core.detector import FaceLocation, detect_and_encode, detect_faces, embed_faces
 from core.geometry import project_point, project_polar
+from core.profile import get_profile
 from core.metrics import PerfTracker
 from core.notifier import get_notifier
 from core.recognizer import FaceRecognizer, Identity
@@ -42,9 +44,17 @@ class FaceIdPipeline:
         self._unknown_since: Dict[str, float] = {}      # start of the current unknown streak
         self._unknown_last_seen: Dict[str, float] = {}  # last frame with an unknown (for grace)
         self._start_monotonic = time.monotonic()        # for the startup warm-up window
+        # Optimized-TX2 per-camera state (unused by the Standard profile)
+        self._frame_count: Dict[str, int] = {}          # for frame-skip
+        self._last_results: Dict[str, List[RecognitionResult]] = {}  # reused on skipped frames
+        self._trackers: Dict[str, object] = {}          # camera_id → FaceTracker
 
     def force_reload(self) -> None:
         self._last_reload = 0.0
+        # Drop optimized per-camera state so a profile switch doesn't carry stale tracks/caches.
+        self._frame_count.clear()
+        self._last_results.clear()
+        self._trackers.clear()
 
     def _reload_templates_if_needed(self) -> None:
         now = time.monotonic()
@@ -145,31 +155,10 @@ class FaceIdPipeline:
         self._world_ema[key] = (world[0], world[1], now)
         return world
 
-    def process_frame(
-        self, frame: np.ndarray, camera_id: str
-    ) -> List[RecognitionResult]:
-        self._reload_templates_if_needed()
-
-        instrument = _settings.metrics_enabled
-        recording = validation_manager.is_active(camera_id)
-        notify_unknown = get_notifier().enabled
-        t_start = time.perf_counter()
-        timing: Optional[Dict[str, float]] = {} if instrument else None
-
-        face_data = detect_and_encode(frame, timing=timing)
-        if not face_data:
-            if notify_unknown:  # no faces → unknown streak resets
-                self._update_unknown_alert(camera_id, [])
-            if recording:  # keep the footage continuous even with zero detections
-                validation_manager.record(camera_id, frame, [], [])
-            if instrument:
-                self.perf.record(
-                    camera_id, detect_ms=timing.get("detect_ms", 0.0),
-                    embed_ms=timing.get("embed_ms", 0.0), match_ms=0.0,
-                    total_ms=(time.perf_counter() - t_start) * 1000.0, faces=0,
-                )
-            return []
-
+    def _recognize(self, face_data, camera_id, frame, recording, notify_unknown):
+        """Shared per-face recognition: match each embedding, log events/positions, build the
+        (results, details, unknown_embeddings, match_ms). Matching is cheap (vector ops); used
+        by both the Standard and Optimized paths once `face_data = [(loc, embedding)]` is ready."""
         threshold = self._recognizer.threshold
         match_ms = 0.0
         results: List[RecognitionResult] = []
@@ -216,6 +205,61 @@ class FaceIdPipeline:
                         "candidates": [[cpid, round(cdist, 6)] for cpid, _, cdist in ranked],
                         "bbox": [int(top), int(right), int(bottom), int(left)],
                     })
+        return results, details, unknown_embeddings, match_ms
+
+    @staticmethod
+    def _downsample(frame: np.ndarray, det_size):
+        """Resize `frame` so it fits within `det_size` (never upscale). Returns (work_frame,
+        scale) where original_coord = work_coord / scale."""
+        if not det_size:
+            return frame, 1.0
+        h, w = frame.shape[:2]
+        dw, dh = det_size
+        scale = min(dw / float(w), dh / float(h))
+        if scale >= 1.0:  # frame already within budget → no upscaling
+            return frame, 1.0
+        work = cv2.resize(frame, (int(round(w * scale)), int(round(h * scale))))
+        return work, scale
+
+    @staticmethod
+    def _remap(loc: FaceLocation, scale: float) -> FaceLocation:
+        if scale == 1.0:
+            return loc
+        return tuple(int(round(c / scale)) for c in loc)  # type: ignore[return-value]
+
+    def process_frame(
+        self, frame: np.ndarray, camera_id: str
+    ) -> List[RecognitionResult]:
+        self._reload_templates_if_needed()
+
+        instrument = _settings.metrics_enabled
+        recording = validation_manager.is_active(camera_id)
+        notify_unknown = get_notifier().enabled
+        t_start = time.perf_counter()
+        timing: Optional[Dict[str, float]] = {} if instrument else None
+
+        prof = get_profile()
+        if prof.is_optimized:
+            return self._process_optimized(
+                frame, camera_id, prof, instrument, recording, notify_unknown, t_start, timing)
+
+        # ── Standard profile — unchanged behaviour ────────────────────────────────
+        face_data = detect_and_encode(frame, timing=timing)
+        if not face_data:
+            if notify_unknown:  # no faces → unknown streak resets
+                self._update_unknown_alert(camera_id, [])
+            if recording:  # keep the footage continuous even with zero detections
+                validation_manager.record(camera_id, frame, [], [])
+            if instrument:
+                self.perf.record(
+                    camera_id, detect_ms=timing.get("detect_ms", 0.0),
+                    embed_ms=timing.get("embed_ms", 0.0), match_ms=0.0,
+                    total_ms=(time.perf_counter() - t_start) * 1000.0, faces=0,
+                )
+            return []
+
+        results, details, unknown_embeddings, match_ms = self._recognize(
+            face_data, camera_id, frame, recording, notify_unknown)
 
         if notify_unknown:
             self._update_unknown_alert(camera_id, unknown_embeddings)
@@ -228,4 +272,75 @@ class FaceIdPipeline:
                 total_ms=(time.perf_counter() - t_start) * 1000.0, faces=len(face_data),
             )
 
+        return results
+
+    def _process_optimized(self, frame, camera_id, prof, instrument, recording,
+                           notify_unknown, t_start, timing):
+        """Optimized-TX2 path: frame-skip → downsample → detect → tracker (skip re-embedding
+        of carried faces) → batch-embed the rest → shared recognition. Gated entirely by the
+        profile; Standard never reaches here."""
+        # Frame-skip: reuse the last results on skipped frames (no recording on skips).
+        cnt = self._frame_count.get(camera_id, -1) + 1
+        self._frame_count[camera_id] = cnt
+        if prof.frame_skip > 1 and (cnt % prof.frame_skip) != 0:
+            cached = self._last_results.get(camera_id, [])
+            if instrument:
+                self.perf.record(camera_id, detect_ms=0.0, embed_ms=0.0, match_ms=0.0,
+                                 total_ms=(time.perf_counter() - t_start) * 1000.0, faces=len(cached))
+            return cached
+
+        work, scale = self._downsample(frame, prof.det_size)
+        pairs = detect_faces(work, timing=timing)  # [(loc_ds, face)]
+        if not pairs:
+            self._last_results[camera_id] = []
+            if notify_unknown:
+                self._update_unknown_alert(camera_id, [])
+            if recording:
+                validation_manager.record(camera_id, frame, [], [])
+            if instrument:
+                self.perf.record(
+                    camera_id, detect_ms=(timing or {}).get("detect_ms", 0.0), embed_ms=0.0,
+                    match_ms=0.0, total_ms=(time.perf_counter() - t_start) * 1000.0, faces=0)
+            return []
+
+        # Tracker carries identity: only embed faces without a cached embedding.
+        if prof.tracker:
+            tracker = self._trackers.get(camera_id)
+            if tracker is None:
+                from core.tracker import FaceTracker
+                tracker = self._trackers[camera_id] = FaceTracker()
+            tracked = tracker.step([loc for loc, _ in pairs])
+        else:
+            tracked = [(None, None)] * len(pairs)
+
+        embs: List[Optional[np.ndarray]] = [None] * len(pairs)
+        to_embed = [i for i, (_, emb) in enumerate(tracked) if emb is None]
+        if to_embed:
+            new = embed_faces(work, [pairs[i] for i in to_embed],
+                              batch=prof.batch_embed, timing=timing)
+            for idx, (_, emb) in zip(to_embed, new):
+                embs[idx] = emb
+                if prof.tracker:
+                    tracker.set_embedding(tracked[idx][0], emb)
+        elif timing is not None:
+            timing["embed_ms"] = 0.0  # all faces carried by the tracker → no embedding this frame
+        for i, (_, emb) in enumerate(tracked):
+            if embs[i] is None:
+                embs[i] = emb  # reuse cached embedding
+
+        # Remap detection boxes back to original-frame coordinates for display/logging.
+        face_data = [(self._remap(loc, scale), embs[i]) for i, (loc, _) in enumerate(pairs)]
+
+        results, details, unknown_embeddings, match_ms = self._recognize(
+            face_data, camera_id, frame, recording, notify_unknown)
+        self._last_results[camera_id] = results
+        if notify_unknown:
+            self._update_unknown_alert(camera_id, unknown_embeddings)
+        if recording:
+            validation_manager.record(camera_id, frame, results, details)
+        if instrument:
+            self.perf.record(
+                camera_id, detect_ms=(timing or {}).get("detect_ms", 0.0),
+                embed_ms=(timing or {}).get("embed_ms", 0.0), match_ms=match_ms,
+                total_ms=(time.perf_counter() - t_start) * 1000.0, faces=len(face_data))
         return results

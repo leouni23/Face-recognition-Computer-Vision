@@ -16,6 +16,7 @@ import numpy as np
 from loguru import logger
 
 from config.settings import get_settings
+from core.profile import get_profile
 
 # On Windows, register CUDA DLL directories installed via pip (nvidia-* packages)
 # so onnxruntime-gpu can find cublasLt64_12.dll, cudart64_12.dll, cudnn64_9.dll etc.
@@ -48,6 +49,17 @@ def _preload_cuda_libs() -> None:
             ort.preload_dlls()
     except Exception as exc:
         logger.debug(f"preload_dlls non disponibile/non necessario: {exc}")
+
+
+def _has_trt_provider() -> bool:
+    """True only if this onnxruntime build exposes the TensorRT EP (the JP4.6 Jetson wheel does;
+    the x86 pip wheel does not). Avoids requesting a phantom provider — passing an unavailable EP
+    in the explicit list makes onnxruntime drop to CPU-only instead of binding CUDA."""
+    try:
+        import onnxruntime as ort
+        return "TensorrtExecutionProvider" in ort.get_available_providers()
+    except Exception:
+        return False
 
 
 def _has_cuda_provider() -> bool:
@@ -84,6 +96,41 @@ _analyzer = None
 _analyzer_lock = threading.Lock()
 
 
+def _build_providers(want_gpu: bool, prof) -> list:
+    """ONNX Runtime providers for the active profile. Standard → CUDA (or CPU). Optimized →
+    prepend the TensorRT EP (FP16/INT8 on the TX2's Maxwell GPU) with the engine cache on the
+    external disk, falling back to CUDA then CPU. If the TRT EP is unavailable (e.g. the x86
+    pip wheel), onnxruntime simply ignores it and CUDA binds — surfaced by `_active_providers`."""
+    if not want_gpu:
+        return ["CPUExecutionProvider"]
+    # Optimized + FP16/INT8 → TensorRT EP first, but only if this build actually has it
+    # (the JP4.6 Jetson wheel does; x86 doesn't → fall back to CUDA cleanly, no phantom provider).
+    if prof.is_optimized and prof.precision in ("fp16", "int8") and _has_trt_provider():
+        try:
+            Path(prof.engine_cache_dir).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        trt_opts = {
+            "trt_engine_cache_enable": True,
+            "trt_engine_cache_path": prof.engine_cache_dir,
+            "trt_fp16_enable": True,  # FP16 for both fp16 and int8 (INT8 still benefits)
+        }
+        if prof.precision == "int8":
+            trt_opts["trt_int8_enable"] = True
+        return [("TensorrtExecutionProvider", trt_opts),
+                "CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+
+def reset_for_profile_change() -> None:
+    """Drop the cached analyzer so the next call rebuilds it with the now-active profile's
+    model pack + providers. Called after a runtime profile switch (/api/settings/profile)."""
+    global _analyzer
+    with _analyzer_lock:
+        _analyzer = None
+    logger.info("InsightFace: analyzer resettato (cambio profilo) — ricostruito al prossimo frame")
+
+
 def _get_analyzer():
     global _analyzer
     if _analyzer is None:
@@ -106,14 +153,14 @@ def _get_analyzer():
                         "oppure usa l'immagine Docker GPU."
                     )
                     want_gpu = False
-                providers = (
-                    ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                    if want_gpu
-                    else ["CPUExecutionProvider"]
+                prof = get_profile()
+                providers = _build_providers(want_gpu, prof)
+                logger.info(
+                    f"InsightFace: profilo={prof.name} pack={prof.model_pack} "
+                    f"precisione={prof.precision} (providers={[p[0] if isinstance(p, tuple) else p for p in providers]})"
                 )
-                logger.info(f"InsightFace: caricamento modelli (providers={providers})")
                 instance = FaceAnalysis(
-                    name="buffalo_l",
+                    name=prof.model_pack,
                     allowed_modules=["detection", "recognition"],
                     providers=providers,
                 )
@@ -196,3 +243,77 @@ def detect_and_encode(
         timing["detect_ms"] = (time.perf_counter() - t0) * 1000.0
         timing["embed_ms"] = 0.0
         return _faces_to_data(faces)
+
+
+# ── Optimized profile: detection / embedding split (for the tracker + batch embedding) ──────
+# Standard keeps detect_and_encode (above) byte-for-byte. The optimized pipeline detects boxes
+# every frame but only embeds faces that the tracker can't carry over — and can batch them.
+
+def detect_faces(frame: np.ndarray, timing: Optional[Dict[str, float]] = None):
+    """Detect faces and return [(location, face)] WITHOUT computing embeddings. `face` is the
+    InsightFace Face (bbox + kps), passed later to `embed_faces`. Filtered by `min_face_px`."""
+    from insightface.app.common import Face
+
+    analyzer = _get_analyzer()
+    min_px = get_settings().min_face_px
+    t0 = time.perf_counter()
+    bboxes, kpss = analyzer.det_model.detect(frame, max_num=0, metric="default")
+    if timing is not None:
+        timing["detect_ms"] = (time.perf_counter() - t0) * 1000.0
+    out = []
+    for i in range(bboxes.shape[0]):
+        x1, y1, x2, y2 = bboxes[i, 0:4].astype(int)
+        if (y2 - y1) < min_px:
+            continue
+        kps = kpss[i] if kpss is not None else None
+        face = Face(bbox=bboxes[i, 0:4], kps=kps, det_score=bboxes[i, 4])
+        location: FaceLocation = (int(y1), int(x2), int(y2), int(x1))  # top, right, bottom, left
+        out.append((location, face))
+    return out
+
+
+def embed_faces(frame: np.ndarray, pairs, batch: bool = False,
+                timing: Optional[Dict[str, float]] = None) -> List[FaceData]:
+    """Compute embeddings for the given [(location, face)] pairs. With `batch=True`, align all
+    crops and run the recogniser in a single forward pass (one expensive call per frame instead
+    of one per face); otherwise the standard per-face path. Returns [(location, embedding)]."""
+    analyzer = _get_analyzer()
+    t0 = time.perf_counter()
+    result: List[FaceData] = []
+    rec = analyzer.models.get("recognition") if hasattr(analyzer, "models") else None
+    if batch and rec is not None and pairs:
+        try:
+            from insightface.utils import face_align
+            crops = [face_align.norm_crop(frame, landmark=face.kps) for _, face in pairs]
+            feats = rec.get_feat(crops)  # (N, 512)
+            for (loc, _), feat in zip(pairs, feats):
+                emb = feat / (np.linalg.norm(feat) + 1e-9)
+                result.append((loc, emb.astype(np.float32)))
+            if timing is not None:
+                timing["embed_ms"] = (time.perf_counter() - t0) * 1000.0
+            return result
+        except Exception as exc:  # any internals mismatch → fall back to per-face
+            logger.debug(f"Batch embedding non disponibile, uso per-volto: {exc}")
+            result = []
+    for loc, face in pairs:
+        for taskname, model in analyzer.models.items():
+            if taskname == "detection":
+                continue
+            model.get(frame, face)
+        result.append((loc, face.normed_embedding.astype(np.float32)))
+    if timing is not None:
+        timing["embed_ms"] = (time.perf_counter() - t0) * 1000.0
+    return result
+
+
+def warmup() -> None:
+    """Eagerly load InsightFace models (+ one dummy inference) at startup so the first
+    real camera frame is not blocked by the slow pure-python protobuf model load."""
+    t0 = time.perf_counter()
+    logger.info("InsightFace: pre-caricamento modelli all'avvio (puo' richiedere alcuni minuti)...")
+    try:
+        detect_and_encode(np.zeros((640, 640, 3), dtype=np.uint8))
+    except Exception:
+        logger.exception("Pre-caricamento modelli fallito; caricamento posticipato al primo frame")
+        return
+    logger.info(f"InsightFace: pre-caricamento completato in {time.perf_counter() - t0:.1f}s")

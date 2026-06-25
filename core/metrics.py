@@ -188,7 +188,7 @@ class _TegrastatsProvider(_BaseProvider):
     def _sample_line(self) -> str:
         proc = subprocess.Popen(
             [self._bin, "--interval", "500"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True,
         )
         try:
             line = proc.stdout.readline() if proc.stdout else ""
@@ -209,13 +209,17 @@ class _TegrastatsProvider(_BaseProvider):
         except Exception:
             _read_psutil(m)
             return m
-        if (mm := self._RAM.search(line)):
+        mm = self._RAM.search(line)
+        if mm:
             m["ram_used_mb"], m["ram_total_mb"] = int(mm.group(1)), int(mm.group(2))
-        if (mm := self._GR3D.search(line)):
+        mm = self._GR3D.search(line)
+        if mm:
             m["gpu_util_pct"] = int(mm.group(1))
-        if (mm := self._GPU_TEMP.search(line)):
+        mm = self._GPU_TEMP.search(line)
+        if mm:
             m["gpu_temp_c"] = round(float(mm.group(1)))
-        if (mm := self._GPU_POWER.search(line)) or (mm := self._IN_POWER.search(line)):
+        mm = self._GPU_POWER.search(line) or self._IN_POWER.search(line)
+        if mm:
             m["gpu_power_w"] = round(int(mm.group(1)) / 1000.0, 1)
         # tegrastats has no single CPU%, leave psutil to fill cpu_pct
         _read_psutil(m)

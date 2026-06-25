@@ -1,0 +1,31 @@
+# Jetson TX2 / JetPack 4.6 (L4T r32.7, CUDA 10.2, Python 3.6).
+# Backport pins so the app runs on the TX2 Python 3.6 (the x86 requirements.txt needs 3.7+/3.8+).
+# The dual-version shims in config/settings.py (pydantic v1) and database/models.py
+# (SQLAlchemy 1.4) keep the SAME source working here and on x86.
+#
+# ASCII-only file (no em-dash / box-drawing chars) to avoid the locale UnicodeDecodeError seen
+# on-device. numpy and opencv are NOT pinned here: they come prebuilt from the
+# dustynv/onnxruntime:r32.7.1 base image. onnxruntime-gpu also comes from that base.
+
+# Web + core (Python 3.6 compatible)
+flask>=2.0,<2.1
+Werkzeug<2.1
+Jinja2<3.1
+itsdangerous<2.1
+click<8.1
+MarkupSafe<2.1
+SQLAlchemy>=1.4,<2.0
+pydantic==1.9.2          # v1: BaseSettings is built in (no pydantic-settings)
+cryptography==3.4.8      # cp36-abi3 aarch64 wheel available -> no Rust build
+loguru==0.6.0
+psutil==5.9.8
+
+# Face recognition (uses the base image numpy / opencv / onnxruntime)
+insightface==0.7.3
+
+# Optional Telegram alerts (text only). 3.6 compatible pin; remove if unused.
+pyTelegramBotAPI==4.4.0
+
+# numpy, opencv-python*, onnxruntime, psycopg2: intentionally omitted.
+#   - numpy / opencv / onnxruntime: provided by the dustynv base (the only ARM/L4T builds that work).
+#   - psycopg2: Jetson uses SQLite.

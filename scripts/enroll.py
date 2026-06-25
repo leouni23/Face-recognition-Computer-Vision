@@ -3,6 +3,7 @@
 import argparse
 import sys
 from pathlib import Path
+from typing import List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -44,7 +45,7 @@ def enroll(name: str, num_samples: int = 5, camera_source: str = "0") -> None:
         sys.exit(0)
 
     cam = CameraStream(camera_source).start()
-    embeddings: list[np.ndarray] = []
+    embeddings: List[np.ndarray] = []
 
     print(f"\nAcquisizione volto per '{name}'.")
     print(f"Premi SPAZIO per catturare un campione ({num_samples} necessari). Q per annullare.\n")

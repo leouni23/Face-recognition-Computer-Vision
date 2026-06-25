@@ -2,7 +2,7 @@
 import queue
 import threading
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 
 import cv2
 import numpy as np
@@ -11,10 +11,10 @@ import numpy as np
 class Broadcaster:
     def __init__(self) -> None:
         self._frame_lock = threading.Lock()
-        self._frames: dict[str, bytes] = {}
-        self._raw_frames: dict[str, np.ndarray] = {}
-        self._camera_ids: set[str] = set()
-        self._viewers: dict[str, int] = {}  # MJPEG viewers per camera
+        self._frames: Dict[str, bytes] = {}
+        self._raw_frames: Dict[str, np.ndarray] = {}
+        self._camera_ids: Set[str] = set()
+        self._viewers: Dict[str, int] = {}  # MJPEG viewers per camera
         self.pipeline = None  # set by main.py for forced template reload
 
         self._sub_lock = threading.Lock()
@@ -79,7 +79,7 @@ class Broadcaster:
             return self._viewers.get(camera_id, 0) > 0
 
     @property
-    def camera_ids(self) -> list[str]:
+    def camera_ids(self) -> List[str]:
         with self._frame_lock:
             return sorted(self._camera_ids)
 

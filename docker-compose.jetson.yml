@@ -1,0 +1,38 @@
+# Face ID - Jetson TX2 (L4T r32.7 / JetPack 4.6). BUILD AND RUN ON THE DEVICE.
+#
+# Pre-run host tuning (max performance): sudo nvpmodel -m 0 && sudo jetson_clocks
+# Mount the external disk first (it holds models, TRT engines, validation data, DB) and point
+# EXT_DISK at it - NOTHING is written to the eMMC.
+#
+#   EXT_DISK=/mnt/faceid \
+#   BIOMETRIC_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
+#   sudo -E docker compose -f docker-compose.jetson.yml up --build
+#
+# onnxruntime-gpu / CUDA / numpy / opencv come from the dustynv/onnxruntime:r32.7.1 base; nothing
+# extra to download. Switch Standard <-> Optimized-TX2 at runtime from the dashboard (top config
+# bar) or by setting PERFORMANCE_PROFILE here.
+
+services:
+  faceid:
+    build:
+      context: .
+      dockerfile: Dockerfile.jetson
+    image: faceid:jetson-tx2
+    container_name: faceid
+    runtime: nvidia                       # mounts CUDA/cuDNN/TensorRT from the host
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # REQUIRED - generate once: python3 -c "import secrets; print(secrets.token_hex(32))"
+      BIOMETRIC_SECRET_KEY: ${BIOMETRIC_SECRET_KEY:?set BIOMETRIC_SECRET_KEY}
+      WEB_PASSWORD: ${WEB_PASSWORD:-}
+      PERFORMANCE_PROFILE: ${PERFORMANCE_PROFILE:-standard}   # standard | optimized-tx2
+      CAMERA_SOURCES: ${CAMERA_SOURCES:-0}
+      USE_GPU: "true"
+      # DATA_DIR / INSIGHTFACE_HOME / TRT_ENGINE_CACHE_DIR already point under /data (Dockerfile).
+    volumes:
+      # External disk -> /data : DB, models, TRT engines, validation artifacts. Never the eMMC.
+      - ${EXT_DISK:?set EXT_DISK to the mounted external disk path}:/data
+    devices:
+      - "/dev/video0:/dev/video0"          # USB/CSI camera; add more or use CAMERA_SOURCES=rtsp://...

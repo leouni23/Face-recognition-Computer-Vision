@@ -6,7 +6,9 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from config.settings import get_settings
-from database.models import CameraCalibration, FaceTemplate, Person, PositionLog, RecognitionEvent
+from database.models import (
+    CameraCalibration, CameraConfig, FaceTemplate, Person, PositionLog, RecognitionEvent,
+)
 from privacy.crypto import decrypt_embedding, encrypt_embedding
 
 _settings = get_settings()
@@ -196,3 +198,43 @@ class CalibrationRepository:
                     homography_json=params_json,
                 )
             )
+
+
+class CameraRepository:
+    """Runtime camera registry CRUD (see models.CameraConfig)."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def all(self) -> List[CameraConfig]:
+        return self.session.query(CameraConfig).order_by(CameraConfig.id).all()
+
+    def get(self, cam_id: str) -> Optional[CameraConfig]:
+        return self.session.query(CameraConfig).filter(CameraConfig.cam_id == cam_id).first()
+
+    def count(self) -> int:
+        return self.session.query(CameraConfig).count()
+
+    def add(self, cam_id: str, name: str, source: str, enabled: bool = True,
+            resolution: Optional[str] = None, notes: Optional[str] = None) -> CameraConfig:
+        row = CameraConfig(cam_id=cam_id, name=name, source=source, enabled=enabled,
+                           resolution=resolution or None, notes=notes or None)
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def update(self, cam_id: str, **fields) -> Optional[CameraConfig]:
+        row = self.get(cam_id)
+        if row is None:
+            return None
+        for k in ("name", "source", "enabled", "resolution", "notes"):
+            if k in fields and fields[k] is not None:
+                setattr(row, k, fields[k])
+        return row
+
+    def delete(self, cam_id: str) -> bool:
+        row = self.get(cam_id)
+        if row is None:
+            return False
+        self.session.delete(row)
+        return True

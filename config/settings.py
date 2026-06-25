@@ -1,7 +1,12 @@
 from functools import lru_cache
 from typing import List
 
-from pydantic_settings import BaseSettings
+try:  # pydantic v2 (x86): pydantic-settings is a separate package
+    from pydantic_settings import BaseSettings
+    _PYDANTIC_V2 = True
+except ImportError:  # pydantic v1 (Jetson / Python 3.6 backport): BaseSettings is built in
+    from pydantic import BaseSettings
+    _PYDANTIC_V2 = False
 
 
 class Settings(BaseSettings):
@@ -28,14 +33,30 @@ class Settings(BaseSettings):
     unknown_alert_warmup: float = 15.0        # nessun alert nei primi N secondi (warm-up camera)
     unknown_alert_min_samples: int = 3        # (legacy) non più usato per il gate
     log_level: str = "INFO"
+    # ── Profilo prestazioni (Standard vs Optimized-TX2) ────────────────────────────
+    # standard = comportamento attuale identico (buffalo_l, FP32/CUDA, full res, nessun
+    # skip/tracker/batch). optimized-tx2 = ottimizzazioni Jetson, ciascun parametro OPT_*.
+    performance_profile: str = "standard"     # "standard" | "optimized-tx2"
+    opt_model_pack: str = "buffalo_s"         # pack InsightFace per il profilo ottimizzato
+    opt_precision: str = "fp16"               # fp16 | int8 | fp32 (TensorRT)
+    opt_det_width: int = 1280                 # downsample rilevamento (0,0 = risoluzione piena)
+    opt_det_height: int = 720
+    opt_frame_skip: int = 2                   # elabora 1 frame ogni N (ottimizzato)
+    opt_tracker: bool = True                  # tracker IoU porta l'identità (salta il re-embed)
+    opt_batch_embed: bool = True              # embedding di tutti i volti del frame in un passo
+    trt_engine_cache_dir: str = ""            # vuoto → {data_dir}/engines (disco esterno)
 
     @property
     def cameras(self) -> List[str]:
         return [s.strip() for s in self.camera_sources.split(",")]
 
-    model_config = {"env_file": ".env"}
+    if _PYDANTIC_V2:
+        model_config = {"env_file": ".env"}
+    else:  # pydantic v1 (Jetson) — stesso effetto, sintassi v1
+        class Config:
+            env_file = ".env"
 
 
-@lru_cache
+@lru_cache(maxsize=None)
 def get_settings() -> Settings:
     return Settings()

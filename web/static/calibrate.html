@@ -176,15 +176,16 @@ document.getElementById('map-file').addEventListener('change', e => {
 
 // ── Cameras ───────────────────────────────────────────────────────────────────
 function loadCameras() {
-  fetch('/api/cameras').then(r => r.json()).then(ids => {
+  fetch('/api/cameras').then(r => r.json()).then(cams => {
     const box = document.getElementById('camera-buttons');
     box.innerHTML = '';
-    if (!ids.length) { box.innerHTML = '<span class="text-gray-600">Nessuna camera attiva.</span>'; return; }
-    ids.forEach(id => {
+    const enabled = (cams || []).filter(c => c.enabled);
+    if (!enabled.length) { box.innerHTML = '<span class="text-gray-600">Nessuna camera attiva.</span>'; return; }
+    enabled.forEach(c => {
       const b = document.createElement('button');
-      b.textContent = `Camera ${id}`;
+      b.textContent = c.name;
       b.className = 'px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors';
-      b.onclick = () => selectCamera(id, b);
+      b.onclick = () => selectCamera(c.cam_id, b);
       box.appendChild(b);
     });
   });

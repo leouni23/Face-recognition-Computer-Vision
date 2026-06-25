@@ -1,61 +1,66 @@
 # syntax=docker/dockerfile:1
 #
-# Face ID — Jetson (ARM64 / L4T). DA COSTRUIRE ED ESEGUIRE SUL DEVICE.
+# Face ID - Jetson TX2 (ARM64 / L4T r32.7 / JetPack 4.6 / CUDA 10.2 / Python 3.6).
+# BUILD AND RUN ON THE DEVICE.
 #
-# Si parte da un'immagine jetson-containers (dusty-nv) che include GIÀ, compilati per la
-# tua L4T, CUDA + cuDNN + onnxruntime (GPU) + numpy + OpenCV. Qui aggiungiamo solo il
-# codice app e le dipendenze pure-Python mancanti (Flask, SQLAlchemy, InsightFace, …).
-# onnxruntime/opencv/numpy NON vengono reinstallati: si usano quelli del base (le uniche
-# build ARM/L4T che funzionano davvero su Jetson — i wheel pip x86 non valgono).
+# Single image, profile selectable at runtime (Standard / Optimized-TX2). The base
+# dustynv/onnxruntime:r32.7.1 already ships, compiled for L4T r32.7: CUDA + cuDNN +
+# onnxruntime-gpu + numpy + OpenCV (the only ARM/L4T builds that actually work - the x86 pip
+# wheels do not). We add only the app code and the missing pure-Python deps from
+# requirements-jetson.txt (Python 3.6 pins). Models + TensorRT engines are NOT baked in: they
+# are downloaded / built on first run onto the external disk mounted at /data.
 #
-#   Jetson TX2  (JetPack 4.6 / L4T r32.7, CUDA 10.2, Python 3.6):
-#     docker build -f Dockerfile.jetson -t faceid:jetson-tx2 \
-#       --build-arg BASE_IMAGE=dustynv/onnxruntime:r32.7.1 .
-#
-#   Jetson Orin (JetPack 6 / L4T r36, CUDA 12, Python 3.10):
-#     docker build -f Dockerfile.jetson -t faceid:jetson-orin \
-#       --build-arg BASE_IMAGE=dustynv/onnxruntime:r36.2.0 .
-#
-#   Esecuzione (sul device, runtime NVIDIA):
-#     docker run --runtime nvidia -p 8000:8000 \
-#       -e BIOMETRIC_SECRET_KEY=<hex> -e DATABASE_URL=sqlite:////data/face_id.db \
-#       -v faceid-data:/data -v faceid-models:/root/.insightface \
-#       --device /dev/video0 faceid:jetson-tx2
-#
-# Suggerimento: `jetson-containers run --autotag onnxruntime` individua il tag base
-# compatibile con la L4T installata; vedi README per la procedura completa.
+#   Build (on the TX2):
+#     sudo docker build -f Dockerfile.jetson -t faceid:jetson-tx2 .
+#   Run: use docker-compose.jetson.yml (mounts /data + the camera, --runtime nvidia).
 
-ARG BASE_IMAGE=dustynv/onnxruntime:r36.2.0
+ARG BASE_IMAGE=dustynv/onnxruntime:r32.7.1
 FROM ${BASE_IMAGE}
 
-ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+# C.UTF-8 locale: avoids the UnicodeDecodeError some L4T images hit reading files under the
+# default POSIX/ascii locale.
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8
 
-# FFMPEG (RTSP) + librerie OpenCV runtime + curl (healthcheck). build-essential per le
-# eventuali estensioni che pip deve compilare su ARM (InsightFace/Cython).
+# FFMPEG (RTSP) + OpenCV runtime libs + curl (healthcheck). build-essential/python3-dev for the
+# few pip extensions that compile on ARM (InsightFace/Cython, cryptography cffi).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg libgl1 libglib2.0-0 curl python3-pip build-essential python3-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Installa SOLO le dipendenze non già fornite dal base jetson-containers.
-# Escludi onnxruntime / opencv-python / numpy / psycopg2 (dal base o non necessari su SQLite).
-COPY requirements.txt .
+# Install ONLY the deps not already in the base. Exclude onnxruntime / opencv-python / numpy /
+# psycopg2 (provided by the base, or unused with SQLite). requirements-jetson.txt already omits
+# them; the grep is a defensive double-check.
+COPY requirements-jetson.txt .
 RUN python3 -m pip install --upgrade pip && \
-    grep -vE '^(onnxruntime|opencv-python|numpy|psycopg2)' requirements.txt > /tmp/req.txt && \
+    grep -vE '^(onnxruntime|opencv-python|numpy|psycopg2)' requirements-jetson.txt > /tmp/req.txt && \
     python3 -m pip install -r /tmp/req.txt
+
+# protobuf C++ backend: the base ships protobuf 3.19.6 without the binary extension, so
+# onnx.load_model parses the ~317 MB buffalo_l models in pure-Python (~550 s per start). Force
+# the manylinux2014_aarch64 cp36 wheel (ships pyext/_message) so the parse drops to ~seconds.
+RUN python3 -m pip install --no-cache-dir --force-reinstall --only-binary=:all: "protobuf==3.19.6" && \
+    python3 -c "from google.protobuf.internal import api_implementation as a; print('protobuf backend:', a.Type())" \
+        || echo "WARN: protobuf C++ backend non disponibile (resta pure-Python, warmup lento)"
 
 COPY . .
 
-# Cache modelli InsightFace nella home di root (l'utente del base è root)
+# Everything on /data (external disk): DB, models, TensorRT engines, validation. Nothing on eMMC.
 ENV DATA_DIR=/data \
     DATABASE_URL=sqlite:////data/face_id.db \
+    INSIGHTFACE_HOME=/data/models \
+    TRT_ENGINE_CACHE_DIR=/data/engines \
     USE_GPU=true \
+    PERFORMANCE_PROFILE=standard \
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=cpp \
     LOG_LEVEL=INFO
-RUN mkdir -p /data /root/.insightface
+# InsightFace looks under ~/.insightface (base user is root): point it at the external disk.
+RUN mkdir -p /data && ln -sf /data/models /root/.insightface
 
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
     CMD curl -fsS http://localhost:8000/api/cameras || exit 1
 
 CMD ["python3", "main.py", "--web", "--host", "0.0.0.0"]

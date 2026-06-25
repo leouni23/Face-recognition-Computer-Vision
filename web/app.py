@@ -13,7 +13,10 @@ from flask import Flask, Response, jsonify, request, send_from_directory, stream
 from loguru import logger
 
 from config.settings import get_settings
-from core.detector import detect_and_encode
+from core.camera import probe_source
+from core.camera_manager import camera_manager
+from core.detector import detect_and_encode, reset_for_profile_change
+from core.profile import OPTIMIZED, STANDARD, get_profile, profile_summary
 from core.geometry import compute_homography, solve_polar_calibration
 from core.validation import validation_manager, validation_root
 from core.validation_metrics import compute_and_export
@@ -70,7 +73,7 @@ def _security_headers(resp: Response) -> Response:
 
 # ── Enrollment session (one at a time) ────────────────────────────────────────
 _enroll_lock = threading.Lock()
-_enroll_session: dict = {}  # {"name": str, "embeddings": list[np.ndarray], "required": int}
+_enroll_session: dict = {}  # {"name": str, "embeddings": List[np.ndarray], "required": int}
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
@@ -228,7 +231,72 @@ def enroll_cancel():
 
 @app.route("/api/cameras")
 def list_cameras():
-    return jsonify(broadcaster.camera_ids)
+    """Registry cameras with live status (connected/connecting/error/stopped/disabled)."""
+    return jsonify(camera_manager.list_cameras())
+
+
+@app.route("/api/cameras", methods=["POST"])
+def add_camera():
+    data = request.get_json(silent=True) or {}
+    try:
+        res = camera_manager.add(
+            name=data.get("name", ""), source=data.get("source", ""),
+            enabled=bool(data.get("enabled", True)), resolution=data.get("resolution") or None,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(res), 201
+
+
+@app.route("/api/cameras/<camera_id>", methods=["PATCH", "PUT"])
+def edit_camera(camera_id: str):
+    data = request.get_json(silent=True) or {}
+    fields = {k: data[k] for k in ("name", "source", "enabled", "resolution") if k in data}
+    try:
+        ok = camera_manager.update(camera_id, **fields)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not ok:
+        return jsonify({"error": "Camera non trovata"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/cameras/<camera_id>", methods=["DELETE"])
+def delete_camera(camera_id: str):
+    if not camera_manager.remove(camera_id):
+        return jsonify({"error": "Camera non trovata"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/cameras/<camera_id>/test", methods=["POST"])
+def test_camera(camera_id: str):
+    """Probe a source (the posted one, or the registered camera's) and return ok + a snapshot."""
+    data = request.get_json(silent=True) or {}
+    source = (data.get("source") or "").strip()
+    if not source:
+        cam = next((c for c in camera_manager.list_cameras() if c["cam_id"] == camera_id), None)
+        if cam is None:
+            return jsonify({"error": "Camera non trovata"}), 404
+        # A running camera holds its device open (USB can't be opened twice) — test via its
+        # live frame instead of re-probing.
+        if cam["status"] == "connected":
+            live = broadcaster.get_raw_frame(camera_id)
+            if live is not None:
+                ok, err, frame = True, None, live
+            else:
+                ok, err, frame = True, "Connessa (nessun frame in cache)", None
+            source = None  # skip probe below
+        else:
+            source = cam["source"]
+    if source:
+        ok, err, frame = probe_source(source)
+    snapshot = None
+    if ok and frame is not None:
+        enc, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if enc:
+            import base64
+            snapshot = "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+    return jsonify({"ok": ok, "error": err, "snapshot": snapshot})
 
 
 @app.route("/api/persons")
@@ -419,6 +487,20 @@ def validation_sessions():
     return jsonify(out)
 
 
+@app.route("/api/validation/compare")
+def validation_compare():
+    """Offline Phase-1 (Standard) vs Phase-2 (Optimized-TX2) comparison, recomputed from the
+    saved JSONL of all sessions (no camera). `?by_preset=1` also splits by condition preset;
+    `?format=csv` returns the per-profile CSV for the paper."""
+    from core.compare import compare, to_csv
+    by_preset = request.args.get("by_preset") in ("1", "true", "yes")
+    result = compare(by_preset=by_preset)
+    if request.args.get("format") == "csv":
+        return Response(to_csv(result), mimetype="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=phase_comparison.csv"})
+    return jsonify(result)
+
+
 @app.route("/api/validation/<session_id>/session")
 def validation_session(session_id: str):
     """The session manifest (gallery, platform, threshold, cameras) for the review UI."""
@@ -581,6 +663,26 @@ def set_match_threshold():
     persisted = _persist_env("MATCH_THRESHOLD", f"{value}")
     logger.info(f"[Settings] MATCH_THRESHOLD = {value} (persistita nel .env: {persisted})")
     return jsonify({"value": value, "persisted": persisted})
+
+
+@app.route("/api/settings/profile", methods=["GET", "POST"])
+def settings_profile():
+    """Get or set the performance profile (Standard vs Optimized-TX2). On POST: persist
+    PERFORMANCE_PROFILE, apply it live, and rebuild the analyzer (new model pack / providers)
+    + drop optimized per-camera state — no full restart needed."""
+    if request.method == "GET":
+        return jsonify({"options": [STANDARD, OPTIMIZED], **profile_summary()})
+    data = request.get_json(silent=True) or {}
+    value = (data.get("profile") or "").strip().lower()
+    if value not in (STANDARD, OPTIMIZED):
+        return jsonify({"error": f"Profilo non valido (usa {STANDARD} o {OPTIMIZED})"}), 400
+    get_settings().performance_profile = value  # live update (read by get_profile())
+    reset_for_profile_change()                  # rebuild InsightFace with the new pack/providers
+    if broadcaster.pipeline is not None:
+        broadcaster.pipeline.force_reload()     # clear optimized per-camera caches/trackers
+    persisted = _persist_env("PERFORMANCE_PROFILE", value)
+    logger.info(f"[Settings] PERFORMANCE_PROFILE = {value} (persistito nel .env: {persisted})")
+    return jsonify({"persisted": persisted, **profile_summary()})
 
 
 def _segments_index(d: Path, camera_id: str) -> list:

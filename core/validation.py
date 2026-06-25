@@ -12,6 +12,7 @@ A single `ValidationManager` singleton is driven from the web UI / CLI; the pipe
 calls `record()` once per processed frame while a session is active.
 """
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -23,6 +24,7 @@ from loguru import logger
 
 from config.settings import get_settings
 from core.metrics import detect_platform_label
+from core.profile import profile_slug, profile_summary
 from core.storage import SEG_MAX_BYTES, SEG_MAX_FRAMES
 from core.validation_presets import load_presets, load_subjects, subject_truth
 
@@ -50,6 +52,30 @@ def set_destination(path: Optional[str]) -> Path:
     global _dest_root
     _dest_root = (Path(path) / "validation") if path else None
     return validation_root()
+
+
+def _configured_cameras() -> List[str]:
+    """Enabled cameras from the runtime registry (fallback: CAMERA_SOURCES). Lazy import keeps
+    core.validation free of a hard dependency on the camera manager."""
+    try:
+        from core.camera_manager import camera_manager
+        ids = camera_manager.active_ids()
+        if ids:
+            return ids
+    except Exception:
+        pass
+    return list(_settings.cameras)
+
+
+def _perf_line(perf: Optional[dict]) -> str:
+    """One-line human summary of the optimization parameters for PROTOCOL.md §2."""
+    perf = perf or {}
+    if perf.get("profile") != "optimized-tx2":
+        return f"pack {perf.get('model_pack', 'buffalo_l')}, FP32, comportamento standard"
+    det = perf.get("det_size")
+    return (f"pack {perf.get('model_pack')}, {perf.get('precision')}, "
+            f"det {('×'.join(map(str, det)) if det else 'full')}, frame-skip {perf.get('frame_skip')}, "
+            f"tracker {'on' if perf.get('tracker') else 'off'}, batch {'on' if perf.get('batch_embed') else 'off'}")
 
 
 def build_protocol_md(meta: dict) -> str:
@@ -105,6 +131,7 @@ Non è una verifica 1:1: FAR/FRR sono forniti solo come alias colloquiali di FPI
 - **Tipo sessione:** {'sessione comune (soggetti statici)' if meta.get('session_type') == 'common' else 'attraversamento singolo-soggetto (ground-truth automatica dal soggetto dichiarato)'}
 - **Registrazione video:** {'sì (video annotato per camera)' if record_video else '**no** — nessuna immagine su disco'}
 - **Verità a terra:** {gt_source}
+- **Profilo prestazioni:** `{(meta.get('performance') or {}).get('profile', 'standard')}` — {_perf_line(meta.get('performance'))}
 - **Piattaforma:** `{meta.get('platform', 'n/d')}`
 - **Destinazione artefatti:** `{(meta.get('destination') or {}).get('root', 'n/d')}`
 - **Telecamere:** {cam_line}
@@ -293,8 +320,40 @@ class ValidationManager:
                 safe = "".join(c for c in name if c.isalnum() or c in "-_")[:40]
                 if safe:
                     session_id = f"{session_id}_{safe}"
-            self._dir = validation_root() / session_id
-            self._dir.mkdir(parents=True, exist_ok=True)
+            # Tag the profile in the folder name so Standard / Optimized sessions are
+            # unambiguously separate on disk (e.g. …_standard / …_optTX2).
+            base = f"{session_id}_{profile_slug()}"
+
+            root = validation_root()
+            # Robustness (Task E5): never silently fall back to internal storage. If an external
+            # destination is configured, its mount point must exist & be writable now — otherwise
+            # warn and STOP. Only the default internal root is auto-created.
+            external = _dest_root is not None or bool(_settings.validation_dir.strip())
+            if external:
+                if not (root.parent.exists() and os.access(root.parent, os.W_OK)):
+                    raise RuntimeError(
+                        f"Destinazione esterna non disponibile/scrivibile ({root.parent}). "
+                        "Monta il disco esterno (o correggi VALIDATION_DIR/destinazione) — "
+                        "nessun fallback su storage interno."
+                    )
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise RuntimeError(f"Impossibile usare la root di validazione {root}: {exc}")
+
+            # Never overwrite a session: create a NEW folder, appending _2/_3… on any collision.
+            self._dir = root / base
+            n = 1
+            while True:
+                try:
+                    self._dir.mkdir(parents=False, exist_ok=False)
+                    break
+                except FileExistsError:
+                    n += 1
+                    self._dir = root / f"{base}_{n}"
+                except OSError as exc:
+                    raise RuntimeError(f"Impossibile creare la cartella di sessione in {root}: {exc}")
+            session_id = self._dir.name  # actual id (possibly suffixed)
             if self._record_video:
                 (self._dir / "video").mkdir(exist_ok=True)  # footage kept in a subfolder (§6 layout)
             self._jsonl = (self._dir / "detections.jsonl").open("w", encoding="utf-8")
@@ -316,6 +375,9 @@ class ValidationManager:
                 "session_type": self._session_type,
                 "record_video": self._record_video,
                 "ground_truth_source": gt_source,
+                # Active performance profile + its optimization parameters (Phase 1 vs Phase 2).
+                "profile": profile_summary()["profile"],
+                "performance": profile_summary(),
                 "platform": detect_platform_label(),
                 "start": datetime.now().isoformat(),
                 "end": None,
@@ -325,7 +387,7 @@ class ValidationManager:
                 # full preset parameters snapshotted → record is self-contained if a preset is later edited
                 "presets": {p["preset_id"]: p for p in preset_list},
                 "destination": {"root": str(self._dir.parent)},
-                "cameras": list(_settings.cameras),  # configured; finalized to seen-cameras at stop
+                "cameras": _configured_cameras(),  # registry enabled; finalized to seen-cameras at stop
             }
             self._write_manifest()
             self._write_protocol()

@@ -580,6 +580,19 @@ La **modalità** è la **prima scelta del wizard** (step 1): *Mappatura (senza v
 
 > **Compromesso:** senza video **non c'è audit trail a posteriori** — non si può rivedere il filmato per contestare un'etichetta o ispezionare un errore. In contesti che richiedono quella verificabilità, attivare il video come fallback. Razionale completo: **`validazione_senza_video_addendum.md`**.
 
+### 11.4 Profilo prestazioni (Standard vs Optimized-TX2) e confronto fasi
+
+Una **singola immagine** espone due profili commutabili a runtime (`core/profile.py`, env `PERFORMANCE_PROFILE`, barra in alto nella dashboard + `POST /api/settings/profile`):
+
+- **Standard** (Fase 1): comportamento **identico** all'attuale — `buffalo_l`, FP32/CUDA, risoluzione piena, nessun skip/tracker/batch.
+- **Optimized-TX2** (Fase 2): FP16/**TensorRT** (engine costruito on-device, cache su `/data/engines`; INT8 opzionale), pack leggero `buffalo_s`, downsampling con remap dei bbox, frame-skip, **tracker IoU** (salta il re-embedding dei volti già identificati) e **batch embedding**. Ogni parametro è un `OPT_*` in `.env`.
+
+Cambiare profilo ricostruisce l'analyzer InsightFace (nuovo pack/provider) senza riavvio. Il profilo attivo e i suoi parametri sono scritti in `session.json` (`profile`, `performance{…}`) e in `PROTOCOL.md`, e il **nome cartella** porta il suffisso `_standard` / `_optTX2`: sessioni delle due fasi restano separate e auto-descrittive su disco. Ogni run è una **cartella nuova** (`mkdir exist_ok=False`, suffisso `_2/_3…` su collisione) — niente è mai sovrascritto; se la destinazione esterna non è montata/scrivibile la sessione **non parte** (nessun fallback su eMMC).
+
+**Confronto offline Fase 1 vs Fase 2** (nessuna camera): `core/compare.py` raggruppa le sessioni per profilo (opz. per preset), **ricalcola** FPIR/FNIR/EER/Rank-1 per gruppo dai JSONL salvati riusando `compute_session_metrics` (matematica invariata) ed emette il confronto + i delta in JSON/CSV. Da CLI `python scripts/compare_sessions.py [--by-preset] [--json out.json --csv out.csv]`, da web `GET /api/validation/compare` o il bottone **Confronta** in `/validation`.
+
+> Deploy completo sul TX2 (immagine singola, disco esterno, profili): vedi il README §«Jetson TX2».
+
 ---
 
 ## 12. Bot Telegram
