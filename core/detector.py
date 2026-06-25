@@ -5,6 +5,7 @@ CPU:  set USE_GPU=false → uses CPUExecutionProvider (fallback automatic)
 
 Models are downloaded on first run (~200 MB, cached in ~/.insightface/).
 """
+import gc
 import os
 import sys
 import threading
@@ -178,6 +179,31 @@ def _build_analyzer():
     return instance
 
 
+def _dispose_analyzer(old) -> None:
+    """Release a replaced FaceAnalysis: drop its onnxruntime InferenceSessions (which own the
+    native CUDA/TensorRT arenas) and force a GC pass. Without this the old profile's GPU/unified
+    memory leaks across switches and starves the TX2's 8 GB → fps collapses."""
+    if old is None:
+        return
+    try:
+        models = getattr(old, "models", None)
+        if isinstance(models, dict):
+            for m in list(models.values()):
+                if hasattr(m, "session"):
+                    m.session = None
+            models.clear()
+        for attr in ("det_model", "models"):
+            if hasattr(old, attr):
+                try:
+                    setattr(old, attr, None)
+                except Exception:
+                    pass
+    except Exception:
+        logger.debug("Dispose analyzer: cleanup parziale")
+    del old
+    gc.collect()
+
+
 def _rebuild_worker() -> None:
     global _analyzer, _rebuilding, _rebuild_again
     while True:
@@ -186,8 +212,16 @@ def _rebuild_worker() -> None:
             logger.info(f"InsightFace: ricostruzione analyzer in background (profilo '{prof.name}')...")
             new = _build_analyzer()
             with _analyzer_lock:
+                old = _analyzer
                 _analyzer = new
+            _dispose_analyzer(old)  # free the old onnxruntime/TensorRT native memory (TX2 8 GB)
             logger.info("InsightFace: nuovo profilo attivo (analyzer sostituito senza riavvio)")
+            if get_settings().profile_switch_restart:
+                # Fallback: onnxruntime r32.7 may not release native arenas in-process. Exit so
+                # Docker (restart: unless-stopped) brings the process back fresh on the new profile
+                # (already persisted to .env) — zero leak, ~seconds feed gap.
+                logger.warning("profile_switch_restart attivo: riavvio pulito del processo per liberare la GPU")
+                os._exit(0)
         except Exception:
             logger.exception("Ricostruzione profilo fallita; mantengo l'analyzer precedente")
         with _rebuild_state_lock:

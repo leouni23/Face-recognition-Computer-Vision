@@ -334,6 +334,18 @@ def delete_person(name: str):
     return jsonify({"message": f"Persona '{name}' eliminata ({count} record)."})
 
 
+@app.route("/api/persons/templates/wipe", methods=["POST"])
+def wipe_templates():
+    """One-off cleanup: drop ALL face templates (keeps persons/consent). For a DB polluted with
+    mixed/untagged embeddings from different recognition models. Re-enroll afterwards."""
+    with get_session() as session:
+        n = PersonRepository(session).delete_all_templates()
+    if broadcaster.pipeline is not None:
+        broadcaster.pipeline.force_reload()
+    logger.info(f"[API] Wipe template volto: {n} eliminati")
+    return jsonify({"deleted": n})
+
+
 @app.route("/api/persons/<int:person_id>/trajectory")
 def person_trajectory(person_id: int):
     """Storico posizioni di un soggetto. Query param opzionale ?minutes=N (default 60)."""
@@ -671,7 +683,10 @@ def settings_profile():
     PERFORMANCE_PROFILE, apply it live, and rebuild the analyzer (new model pack / providers)
     + drop optimized per-camera state — no full restart needed."""
     if request.method == "GET":
-        return jsonify({"options": [STANDARD, OPTIMIZED], **profile_summary()})
+        summary = profile_summary()
+        with get_session() as session:
+            summary["templates_for_profile"] = PersonRepository(session).count_templates(summary["model_pack"])
+        return jsonify({"options": [STANDARD, OPTIMIZED], **summary})
     data = request.get_json(silent=True) or {}
     value = (data.get("profile") or "").strip().lower()
     if value not in (STANDARD, OPTIMIZED):

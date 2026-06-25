@@ -36,6 +36,9 @@ class FaceTemplate(Base):
     person_id = Column(Integer, ForeignKey("persons.id", ondelete="CASCADE"), nullable=False)
     # AES-128-CBC + HMAC (Fernet) encrypted 512-d float32 face embedding — never stored in plaintext
     encoding_encrypted = Column(LargeBinary, nullable=False)
+    # Recognition model pack that produced this embedding (buffalo_l/buffalo_s). Embeddings from
+    # different packs live in incompatible spaces — matching must filter by the active pack.
+    model_pack = Column(String(32), nullable=True, index=True)
     enrolled_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     person = relationship("Person", back_populates="templates")
