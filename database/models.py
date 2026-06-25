@@ -98,3 +98,19 @@ class CameraCalibration(Base):
     points_json = Column(Text, nullable=False)
     homography_json = Column(Text, nullable=False)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CameraConfig(Base):
+    """Runtime camera registry (CRUD from the UI). `cam_id` is the stable key used by the
+    broadcaster, calibration and position logs. `source` is a USB index ("0") or an
+    rtsp://|rtsps://|rtmp://|http:// URL. `resolution` empty = native."""
+    __tablename__ = "camera_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    cam_id = Column(String(64), nullable=False, unique=True, index=True)
+    name = Column(String(255), nullable=False)
+    source = Column(Text, nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    resolution = Column(String(32), nullable=True)   # e.g. "1280x720"; empty = native
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

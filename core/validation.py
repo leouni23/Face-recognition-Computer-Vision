@@ -54,6 +54,19 @@ def set_destination(path: Optional[str]) -> Path:
     return validation_root()
 
 
+def _configured_cameras() -> List[str]:
+    """Enabled cameras from the runtime registry (fallback: CAMERA_SOURCES). Lazy import keeps
+    core.validation free of a hard dependency on the camera manager."""
+    try:
+        from core.camera_manager import camera_manager
+        ids = camera_manager.active_ids()
+        if ids:
+            return ids
+    except Exception:
+        pass
+    return list(_settings.cameras)
+
+
 def _perf_line(perf: Optional[dict]) -> str:
     """One-line human summary of the optimization parameters for PROTOCOL.md §2."""
     perf = perf or {}
@@ -374,7 +387,7 @@ class ValidationManager:
                 # full preset parameters snapshotted → record is self-contained if a preset is later edited
                 "presets": {p["preset_id"]: p for p in preset_list},
                 "destination": {"root": str(self._dir.parent)},
-                "cameras": list(_settings.cameras),  # configured; finalized to seen-cameras at stop
+                "cameras": _configured_cameras(),  # registry enabled; finalized to seen-cameras at stop
             }
             self._write_manifest()
             self._write_protocol()

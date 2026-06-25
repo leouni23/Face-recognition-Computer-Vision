@@ -1,80 +1,171 @@
+import os
 import queue
-import time
 import threading
-from typing import Optional, Union
+import time
+from typing import Optional, Tuple, Union
 
 import cv2
 import numpy as np
 from loguru import logger
 
 _RTSP_PREFIXES = ("rtsp://", "rtsps://", "rtmp://")
-_RECONNECT_DELAY = 2.0   # seconds between reconnect attempts
-_MAX_RECONNECTS = 30     # give up after this many consecutive failures
+_URL_PREFIXES = _RTSP_PREFIXES + ("http://", "https://")
+_RECONNECT_DELAY = 2.0    # base seconds between reconnect attempts
+_RECONNECT_MAX = 15.0     # backoff cap
+
+# Fail fast on dead RTSP: TCP transport + short open/read timeout (microseconds).
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|stimeout;5000000"
+)
+
+
+def validate_source(source: str) -> Optional[str]:
+    """Return an error string if `source` is not a valid camera source, else None.
+    Valid: an integer index ("0") or an rtsp://|rtsps://|rtmp://|http(s):// URL."""
+    s = (source or "").strip()
+    if not s:
+        return "Sorgente vuota"
+    if s.isdigit():
+        return None
+    if s.lower().startswith(_URL_PREFIXES):
+        return None
+    return "Sorgente non valida: usa un indice USB (es. 0) o un URL rtsp://|http://"
+
+
+def _is_url(source: str) -> bool:
+    return source.lower().startswith(_URL_PREFIXES)
+
+
+def _open_capture(source: str) -> "cv2.VideoCapture":
+    if _is_url(source):
+        cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    else:
+        src: Union[int, str] = int(source) if source.isdigit() else source
+        cap = cv2.VideoCapture(src)
+    return cap
+
+
+def _apply_resolution(cap: "cv2.VideoCapture", resolution: Optional[str]) -> None:
+    if not resolution:
+        return
+    try:
+        w, h = (int(x) for x in resolution.lower().split("x", 1))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+    except (ValueError, TypeError):
+        logger.warning(f"Risoluzione ignorata (formato non valido): {resolution!r}")
+
+
+def probe_source(source: str, timeout: float = 6.0) -> Tuple[bool, Optional[str], Optional[np.ndarray]]:
+    """Open `source` briefly and grab one frame. Runs the (possibly blocking) open+read in a
+    thread with a join timeout so a dead RTSP URL fails fast. Returns (ok, error, frame)."""
+    err = validate_source(source)
+    if err:
+        return False, err, None
+
+    result: dict = {}
+
+    def _work() -> None:
+        cap = None
+        try:
+            cap = _open_capture(source)
+            if not cap.isOpened():
+                result["err"] = "Impossibile aprire la sorgente"
+                return
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                result["err"] = "Aperta ma nessun frame ricevuto"
+                return
+            result["frame"] = frame
+        except Exception as exc:  # never propagate
+            result["err"] = str(exc)
+        finally:
+            if cap is not None:
+                cap.release()
+
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return False, f"Timeout dopo {timeout:.0f}s (sorgente irraggiungibile)", None
+    if "frame" in result:
+        return True, None, result["frame"]
+    return False, result.get("err", "Errore sconosciuto"), None
 
 
 class CameraStream:
-    """Threaded camera reader — supports local indices and RTSP/RTMP URLs.
+    """Threaded camera reader for USB indices and RTSP/RTMP/HTTP URLs.
 
-    RTSP streams use the FFMPEG backend with buffer=1 for minimum latency and
-    auto-reconnect on dropout.
+    Robust by design: the constructor NEVER opens the device (so an unreachable URL can't crash
+    startup). The capture loop opens lazily and reconnects with backoff, exposing a live
+    `status` ("connecting"/"connected"/"error") + `last_error` instead of raising.
     """
 
-    def __init__(self, source: str, camera_id: Optional[str] = None):
+    def __init__(self, source: str, camera_id: Optional[str] = None,
+                 resolution: Optional[str] = None):
         self._source = source
-        self._is_rtsp = source.lower().startswith(_RTSP_PREFIXES)
+        self._resolution = resolution
+        self._is_url = _is_url(source)
         self.camera_id = camera_id or source
-
-        self._cap = self._open()
+        self._cap: Optional["cv2.VideoCapture"] = None
         self._queue = queue.Queue(maxsize=2)  # type: queue.Queue
         self._stop_event = threading.Event()
+        self._status_lock = threading.Lock()
+        self._status = "connecting"
+        self._last_error: Optional[str] = None
         self._thread = threading.Thread(
             target=self._capture_loop, daemon=True, name=f"cam-{self.camera_id}"
         )
 
-    def _open(self) -> cv2.VideoCapture:
-        if self._is_rtsp:
-            cap = cv2.VideoCapture(self._source, cv2.CAP_FFMPEG)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        else:
-            src: Union[int, str] = int(self._source) if self._source.isdigit() else self._source
-            cap = cv2.VideoCapture(src)
+    def _set_status(self, status: str, error: Optional[str] = None) -> None:
+        with self._status_lock:
+            self._status = status
+            self._last_error = error
 
-        if not cap.isOpened():
-            raise RuntimeError(f"Impossibile aprire la camera: {self._source!r}")
-        return cap
+    def status(self) -> dict:
+        with self._status_lock:
+            return {"status": self._status, "last_error": self._last_error}
 
     def start(self) -> "CameraStream":
         self._thread.start()
-        logger.info(f"Camera {self.camera_id!r} avviata {'(RTSP)' if self._is_rtsp else ''}")
+        logger.info(f"Camera {self.camera_id!r} avviata {'(URL)' if self._is_url else ''}")
         return self
 
     def _capture_loop(self) -> None:
-        reconnects = 0
+        delay = _RECONNECT_DELAY
         while not self._stop_event.is_set():
-            ret, frame = self._cap.read()
-            if not ret:
-                if not self._is_rtsp:
-                    logger.warning(f"Camera {self.camera_id!r}: fine stream")
-                    break
-
-                reconnects += 1
-                if reconnects > _MAX_RECONNECTS:
-                    logger.error(f"Camera {self.camera_id!r}: troppi errori, abbandono")
-                    break
-                logger.warning(
-                    f"Camera {self.camera_id!r}: connessione persa "
-                    f"(tentativo {reconnects}/{_MAX_RECONNECTS}), riconnessione..."
-                )
-                self._cap.release()
-                time.sleep(_RECONNECT_DELAY)
+            if self._cap is None:
+                self._set_status("connecting")
                 try:
-                    self._cap = self._open()
-                except RuntimeError:
-                    pass
+                    cap = _open_capture(self._source)
+                    _apply_resolution(cap, self._resolution)
+                except Exception as exc:
+                    cap = None
+                    self._set_status("error", str(exc))
+                if cap is None or not cap.isOpened():
+                    if cap is not None:
+                        cap.release()
+                    self._set_status("error", "Impossibile aprire la sorgente")
+                    if self._stop_event.wait(delay):
+                        break
+                    delay = min(delay * 1.5, _RECONNECT_MAX)
+                    continue
+                self._cap = cap
+                delay = _RECONNECT_DELAY
+
+            ret, frame = self._cap.read()
+            if not ret or frame is None:
+                self._cap.release()
+                self._cap = None
+                self._set_status("error", "Connessione persa")
+                logger.warning(f"Camera {self.camera_id!r}: connessione persa, riconnessione...")
+                if self._stop_event.wait(delay):
+                    break
+                delay = min(delay * 1.5, _RECONNECT_MAX)
                 continue
 
-            reconnects = 0
-            # Drop the oldest frame if the consumer is too slow
+            self._set_status("connected")
             if self._queue.full():
                 try:
                     self._queue.get_nowait()
@@ -90,5 +181,6 @@ class CameraStream:
 
     def stop(self) -> None:
         self._stop_event.set()
-        self._cap.release()
+        if self._cap is not None:
+            self._cap.release()
         logger.info(f"Camera {self.camera_id!r} fermata")

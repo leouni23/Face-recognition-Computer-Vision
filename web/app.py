@@ -13,6 +13,8 @@ from flask import Flask, Response, jsonify, request, send_from_directory, stream
 from loguru import logger
 
 from config.settings import get_settings
+from core.camera import probe_source
+from core.camera_manager import camera_manager
 from core.detector import detect_and_encode, reset_for_profile_change
 from core.profile import OPTIMIZED, STANDARD, get_profile, profile_summary
 from core.geometry import compute_homography, solve_polar_calibration
@@ -229,7 +231,72 @@ def enroll_cancel():
 
 @app.route("/api/cameras")
 def list_cameras():
-    return jsonify(broadcaster.camera_ids)
+    """Registry cameras with live status (connected/connecting/error/stopped/disabled)."""
+    return jsonify(camera_manager.list_cameras())
+
+
+@app.route("/api/cameras", methods=["POST"])
+def add_camera():
+    data = request.get_json(silent=True) or {}
+    try:
+        res = camera_manager.add(
+            name=data.get("name", ""), source=data.get("source", ""),
+            enabled=bool(data.get("enabled", True)), resolution=data.get("resolution") or None,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(res), 201
+
+
+@app.route("/api/cameras/<camera_id>", methods=["PATCH", "PUT"])
+def edit_camera(camera_id: str):
+    data = request.get_json(silent=True) or {}
+    fields = {k: data[k] for k in ("name", "source", "enabled", "resolution") if k in data}
+    try:
+        ok = camera_manager.update(camera_id, **fields)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not ok:
+        return jsonify({"error": "Camera non trovata"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/cameras/<camera_id>", methods=["DELETE"])
+def delete_camera(camera_id: str):
+    if not camera_manager.remove(camera_id):
+        return jsonify({"error": "Camera non trovata"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/cameras/<camera_id>/test", methods=["POST"])
+def test_camera(camera_id: str):
+    """Probe a source (the posted one, or the registered camera's) and return ok + a snapshot."""
+    data = request.get_json(silent=True) or {}
+    source = (data.get("source") or "").strip()
+    if not source:
+        cam = next((c for c in camera_manager.list_cameras() if c["cam_id"] == camera_id), None)
+        if cam is None:
+            return jsonify({"error": "Camera non trovata"}), 404
+        # A running camera holds its device open (USB can't be opened twice) — test via its
+        # live frame instead of re-probing.
+        if cam["status"] == "connected":
+            live = broadcaster.get_raw_frame(camera_id)
+            if live is not None:
+                ok, err, frame = True, None, live
+            else:
+                ok, err, frame = True, "Connessa (nessun frame in cache)", None
+            source = None  # skip probe below
+        else:
+            source = cam["source"]
+    if source:
+        ok, err, frame = probe_source(source)
+    snapshot = None
+    if ok and frame is not None:
+        enc, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if enc:
+            import base64
+            snapshot = "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+    return jsonify({"ok": ok, "error": err, "snapshot": snapshot})
 
 
 @app.route("/api/persons")
