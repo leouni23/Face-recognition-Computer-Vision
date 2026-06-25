@@ -85,6 +85,9 @@ def main() -> None:
     pipeline = FaceIdPipeline()
     broadcaster.pipeline = pipeline
 
+    from core.detector import warmup as _warmup_models
+    threading.Thread(target=_warmup_models, daemon=True, name="model-warmup").start()
+
     from core.notifier import build_notifier, set_notifier
     notifier = build_notifier(_settings)
     set_notifier(notifier)

@@ -304,3 +304,16 @@ def embed_faces(frame: np.ndarray, pairs, batch: bool = False,
     if timing is not None:
         timing["embed_ms"] = (time.perf_counter() - t0) * 1000.0
     return result
+
+
+def warmup() -> None:
+    """Eagerly load InsightFace models (+ one dummy inference) at startup so the first
+    real camera frame is not blocked by the slow pure-python protobuf model load."""
+    t0 = time.perf_counter()
+    logger.info("InsightFace: pre-caricamento modelli all'avvio (puo' richiedere alcuni minuti)...")
+    try:
+        detect_and_encode(np.zeros((640, 640, 3), dtype=np.uint8))
+    except Exception:
+        logger.exception("Pre-caricamento modelli fallito; caricamento posticipato al primo frame")
+        return
+    logger.info(f"InsightFace: pre-caricamento completato in {time.perf_counter() - t0:.1f}s")
