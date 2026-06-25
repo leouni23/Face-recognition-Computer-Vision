@@ -122,13 +122,98 @@ def _build_providers(want_gpu: bool, prof) -> list:
     return ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
 
+# Profile-switch rebuild state. A switch must NOT block the app: the heavy rebuild (new model
+# pack + TensorRT engine build, minutes) runs in a background thread while the old analyzer keeps
+# serving frames; the new one is swapped in atomically when ready.
+_rebuild_state_lock = threading.Lock()
+_rebuilding = False
+_rebuild_again = False
+
+
+def _build_analyzer():
+    """Construct + prepare a FaceAnalysis for the *currently active* profile. Heavy (model load +
+    TensorRT engine build). Callers must NOT hold `_analyzer_lock` while this runs."""
+    from insightface.app import FaceAnalysis
+
+    settings = get_settings()
+    want_gpu = settings.use_gpu
+    if want_gpu:
+        _preload_cuda_libs()
+    if want_gpu and not _has_cuda_provider():
+        # CPU-only `onnxruntime` wheel installed → CUDA can never bind.
+        logger.warning(
+            "USE_GPU=true ma questo onnxruntime NON espone CUDAExecutionProvider "
+            "(è installato il wheel CPU 'onnxruntime'). Inferenza su CPU. "
+            "Per la GPU: pip install onnxruntime-gpu (+ runtime CUDA 12 / cuDNN 9), "
+            "oppure usa l'immagine Docker GPU."
+        )
+        want_gpu = False
+    prof = get_profile()
+    providers = _build_providers(want_gpu, prof)
+    logger.info(
+        f"InsightFace: profilo={prof.name} pack={prof.model_pack} "
+        f"precisione={prof.precision} (providers={[p[0] if isinstance(p, tuple) else p for p in providers]})"
+    )
+    instance = FaceAnalysis(
+        name=prof.model_pack,
+        allowed_modules=["detection", "recognition"],
+        providers=providers,
+    )
+    instance.prepare(
+        ctx_id=0 if want_gpu else -1,
+        det_size=(640, 640),
+        det_thresh=settings.det_threshold,
+    )
+    active = _active_providers(instance)
+    if want_gpu and "CUDAExecutionProvider" not in active:
+        logger.warning(
+            "USE_GPU=true ma CUDA non si è agganciato (provider attivi: "
+            f"{sorted(active)}); inferenza su CPU. Verifica le librerie CUDA 12 / "
+            "cuDNN 9 e i driver NVIDIA (--gpus all nel container)."
+        )
+    logger.info(
+        f"InsightFace: modelli pronti (provider attivi={sorted(active)}, "
+        f"det_thresh={settings.det_threshold}, min_face_px={settings.min_face_px})"
+    )
+    return instance
+
+
+def _rebuild_worker() -> None:
+    global _analyzer, _rebuilding, _rebuild_again
+    while True:
+        try:
+            prof = get_profile()
+            logger.info(f"InsightFace: ricostruzione analyzer in background (profilo '{prof.name}')...")
+            new = _build_analyzer()
+            with _analyzer_lock:
+                _analyzer = new
+            logger.info("InsightFace: nuovo profilo attivo (analyzer sostituito senza riavvio)")
+        except Exception:
+            logger.exception("Ricostruzione profilo fallita; mantengo l'analyzer precedente")
+        with _rebuild_state_lock:
+            if _rebuild_again:
+                _rebuild_again = False
+                continue  # a newer switch arrived mid-build → rebuild for the latest profile
+            _rebuilding = False
+            return
+
+
 def reset_for_profile_change() -> None:
-    """Drop the cached analyzer so the next call rebuilds it with the now-active profile's
-    model pack + providers. Called after a runtime profile switch (/api/settings/profile)."""
-    global _analyzer
-    with _analyzer_lock:
-        _analyzer = None
-    logger.info("InsightFace: analyzer resettato (cambio profilo) — ricostruito al prossimo frame")
+    """Apply a runtime profile switch WITHOUT freezing the app. The analyzer rebuild (new model
+    pack / providers / TensorRT engines — can take minutes on the TX2) runs in a background thread
+    and is swapped in atomically; the previous analyzer keeps serving frames meanwhile, so the
+    camera feed and web UI stay responsive. Rapid switches are coalesced to the latest profile."""
+    global _rebuilding, _rebuild_again
+    if _analyzer is None:
+        # Never built yet → the lazy first build in _get_analyzer (warm-up) handles it.
+        return
+    with _rebuild_state_lock:
+        if _rebuilding:
+            _rebuild_again = True
+            logger.info("InsightFace: cambio profilo accodato (ricostruzione già in corso)")
+            return
+        _rebuilding = True
+    threading.Thread(target=_rebuild_worker, daemon=True, name="profile-rebuild").start()
 
 
 def _get_analyzer():
@@ -136,56 +221,8 @@ def _get_analyzer():
     if _analyzer is None:
         with _analyzer_lock:
             if _analyzer is None:
-                from insightface.app import FaceAnalysis
-
-                settings = get_settings()
-                want_gpu = settings.use_gpu
-                if want_gpu:
-                    _preload_cuda_libs()
-                if want_gpu and not _has_cuda_provider():
-                    # CPU-only `onnxruntime` wheel installed → CUDA can never bind.
-                    # Don't advertise a provider we can't honour: fall back explicitly
-                    # so the log reflects reality instead of a silent CPU run.
-                    logger.warning(
-                        "USE_GPU=true ma questo onnxruntime NON espone CUDAExecutionProvider "
-                        "(è installato il wheel CPU 'onnxruntime'). Inferenza su CPU. "
-                        "Per la GPU: pip install onnxruntime-gpu (+ runtime CUDA 12 / cuDNN 9), "
-                        "oppure usa l'immagine Docker GPU."
-                    )
-                    want_gpu = False
-                prof = get_profile()
-                providers = _build_providers(want_gpu, prof)
-                logger.info(
-                    f"InsightFace: profilo={prof.name} pack={prof.model_pack} "
-                    f"precisione={prof.precision} (providers={[p[0] if isinstance(p, tuple) else p for p in providers]})"
-                )
-                instance = FaceAnalysis(
-                    name=prof.model_pack,
-                    allowed_modules=["detection", "recognition"],
-                    providers=providers,
-                )
-                instance.prepare(
-                    ctx_id=0 if want_gpu else -1,
-                    det_size=(640, 640),
-                    det_thresh=settings.det_threshold,
-                )
-                active = _active_providers(instance)
-                if want_gpu and "CUDAExecutionProvider" not in active:
-                    # CUDA was offered but didn't bind — almost always missing CUDA 12 /
-                    # cuDNN 9 runtime libs (e.g. a Docker base without cuDNN). onnxruntime
-                    # degrades to CPU without raising, so surface it loudly here.
-                    logger.warning(
-                        "USE_GPU=true ma CUDA non si è agganciato (provider attivi: "
-                        f"{sorted(active)}); inferenza su CPU. Verifica le librerie CUDA 12 / "
-                        "cuDNN 9 e i driver NVIDIA (--gpus all nel container)."
-                    )
-                logger.info(
-                    f"InsightFace: modelli pronti (provider attivi={sorted(active)}, "
-                    f"det_thresh={settings.det_threshold}, min_face_px={settings.min_face_px})"
-                )
-                _analyzer = instance
+                _analyzer = _build_analyzer()
     return _analyzer
-
 
 def _faces_to_data(faces) -> List[FaceData]:
     """Convert InsightFace results to (location, embedding), dropping faces shorter than
