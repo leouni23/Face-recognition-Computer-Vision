@@ -19,7 +19,7 @@ from config.settings import get_settings
 from core.camera_manager import camera_manager
 from core.pipeline import FaceIdPipeline, RecognitionResult
 from database.models import Base
-from database.session import engine, get_session
+from database.session import engine, get_session, migrate_schema
 from privacy.retention import run_retention
 from ui.display import Display
 from web.broadcaster import broadcaster
@@ -76,6 +76,7 @@ def main() -> None:
         )
 
     Base.metadata.create_all(engine)
+    migrate_schema()  # idempotent: adds FaceTemplate.model_pack to an existing DB
 
     with get_session() as session:
         deleted = run_retention(session, _settings.data_retention_days)

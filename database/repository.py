@@ -36,19 +36,42 @@ class PersonRepository:
         person.consent_date = datetime.utcnow()
 
     def add_template(self, person: Person, encoding: np.ndarray) -> FaceTemplate:
+        # Tag the embedding with the recognition model that produced it (active profile pack),
+        # so matching never mixes incompatible embedding spaces across profiles.
+        from core.profile import get_profile
         encrypted = encrypt_embedding(encoding, _settings.biometric_secret_key)
-        template = FaceTemplate(person_id=person.id, encoding_encrypted=encrypted)
+        template = FaceTemplate(person_id=person.id, encoding_encrypted=encrypted,
+                                model_pack=get_profile().model_pack)
         self.session.add(template)
         return template
 
-    def load_all_templates(self) -> List[Tuple[int, str, np.ndarray]]:
-        """Return (person_id, name, encoding) for every active, consenting person."""
-        rows = (
+    def delete_all_templates(self) -> int:
+        """Drop every face template (keeps persons + consent). One-off cleanup for the polluted,
+        untagged DB before per-model tagging takes effect."""
+        n = self.session.query(FaceTemplate).delete()
+        return n
+
+    def count_templates(self, model_pack: str) -> int:
+        return (
+            self.session.query(FaceTemplate)
+            .join(Person)
+            .filter(Person.active == True, Person.consent_given == True,
+                    FaceTemplate.model_pack == model_pack)
+            .count()
+        )
+
+    def load_all_templates(self, model_pack: Optional[str] = None) -> List[Tuple[int, str, np.ndarray]]:
+        """Return (person_id, name, encoding) for active, consenting people. When `model_pack`
+        is given, only templates from that recognition model (embeddings from other packs are in
+        an incompatible space and must not be matched against)."""
+        q = (
             self.session.query(Person, FaceTemplate)
             .join(FaceTemplate)
             .filter(Person.active == True, Person.consent_given == True)
-            .all()
         )
+        if model_pack is not None:
+            q = q.filter(FaceTemplate.model_pack == model_pack)
+        rows = q.all()
         result = []
         for person, template in rows:
             try:

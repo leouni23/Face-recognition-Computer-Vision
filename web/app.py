@@ -1,7 +1,9 @@
 import hmac
 import json
+import os
 import queue
 import re
+import subprocess
 import threading
 import time
 from datetime import datetime, timedelta
@@ -15,7 +17,7 @@ from loguru import logger
 from config.settings import get_settings
 from core.camera import probe_source
 from core.camera_manager import camera_manager
-from core.detector import detect_and_encode, reset_for_profile_change
+from core.detector import detect_and_encode, get_warmup_state, reset_for_profile_change
 from core.profile import OPTIMIZED, STANDARD, get_profile, profile_summary
 from core.geometry import compute_homography, solve_polar_calibration
 from core.validation import validation_manager, validation_root
@@ -332,6 +334,18 @@ def delete_person(name: str):
         broadcaster.pipeline.force_reload()
     logger.info(f"[API] Dati biometrici di '{name}' eliminati (GDPR Art. 17)")
     return jsonify({"message": f"Persona '{name}' eliminata ({count} record)."})
+
+
+@app.route("/api/persons/templates/wipe", methods=["POST"])
+def wipe_templates():
+    """One-off cleanup: drop ALL face templates (keeps persons/consent). For a DB polluted with
+    mixed/untagged embeddings from different recognition models. Re-enroll afterwards."""
+    with get_session() as session:
+        n = PersonRepository(session).delete_all_templates()
+    if broadcaster.pipeline is not None:
+        broadcaster.pipeline.force_reload()
+    logger.info(f"[API] Wipe template volto: {n} eliminati")
+    return jsonify({"deleted": n})
 
 
 @app.route("/api/persons/<int:person_id>/trajectory")
@@ -671,7 +685,10 @@ def settings_profile():
     PERFORMANCE_PROFILE, apply it live, and rebuild the analyzer (new model pack / providers)
     + drop optimized per-camera state — no full restart needed."""
     if request.method == "GET":
-        return jsonify({"options": [STANDARD, OPTIMIZED], **profile_summary()})
+        summary = profile_summary()
+        with get_session() as session:
+            summary["templates_for_profile"] = PersonRepository(session).count_templates(summary["model_pack"])
+        return jsonify({"options": [STANDARD, OPTIMIZED], **summary})
     data = request.get_json(silent=True) or {}
     value = (data.get("profile") or "").strip().lower()
     if value not in (STANDARD, OPTIMIZED):
@@ -683,6 +700,53 @@ def settings_profile():
     persisted = _persist_env("PERFORMANCE_PROFILE", value)
     logger.info(f"[Settings] PERFORMANCE_PROFILE = {value} (persistito nel .env: {persisted})")
     return jsonify({"persisted": persisted, **profile_summary()})
+
+
+@app.route("/api/warmup")
+def warmup_status():
+    """Model warm-up progress for the UI bar: {active, phase, pct, eta_s, ready}."""
+    return jsonify(get_warmup_state())
+
+
+_CONTAINER = os.environ.get("FACEID_CONTAINER", "faceid")
+
+
+def _delayed(fn, delay=0.4):
+    def _run():
+        time.sleep(delay)
+        fn()
+    threading.Thread(target=_run, daemon=True).start()
+
+
+@app.route("/api/system/power", methods=["POST"])
+def system_power():
+    """Restart or shut down the container from the UI. Gated by `_guard_request` (WEB_PASSWORD when
+    set + cross-site reject); requires `confirm: true`. restart = clean exit (Docker
+    `--restart unless-stopped` brings it back). shutdown = `docker stop` via the mounted Docker
+    socket (needs the socket mount + docker CLI in the image; 501 if unavailable → restart still works)."""
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "").strip().lower()
+    if not data.get("confirm"):
+        return jsonify({"error": "Conferma richiesta"}), 400
+    if action == "restart":
+        logger.warning("[System] Riavvio richiesto dalla UI — uscita pulita (Docker riavvia)")
+        _delayed(lambda: os._exit(0))
+        return jsonify({"action": "restart", "message": "Riavvio in corso…"})
+    if action == "shutdown":
+        try:
+            proc = subprocess.run(["docker", "stop", _CONTAINER], timeout=30,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            return jsonify({"error": "docker CLI non disponibile nell'immagine (vedi run.sh / "
+                            "Dockerfile.jetson per il mount del socket)"}), 501
+        except Exception as exc:
+            return jsonify({"error": f"docker stop fallito: {exc}"}), 500
+        if proc.returncode != 0:
+            err = (proc.stderr or b"").decode("utf-8", "replace").strip() or "docker stop fallito"
+            return jsonify({"error": err}), 502  # socket non montato / container non trovato
+        logger.warning("[System] Spegnimento richiesto dalla UI — docker stop %s", _CONTAINER)
+        return jsonify({"action": "shutdown", "message": "Container fermato."})
+    return jsonify({"error": "action deve essere 'restart' o 'shutdown'"}), 400
 
 
 def _segments_index(d: Path, camera_id: str) -> list:

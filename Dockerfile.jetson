@@ -23,9 +23,11 @@ ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 # FFMPEG (RTSP) + OpenCV runtime libs + curl (healthcheck). build-essential/python3-dev for the
-# few pip extensions that compile on ARM (InsightFace/Cython, cryptography cffi).
+# few pip extensions that compile on ARM (InsightFace/Cython, cryptography cffi). docker.io = the
+# docker CLI only (daemon unused) so the UI "Spegni" can `docker stop` over the mounted host socket
+# (run.sh: -v /var/run/docker.sock:/var/run/docker.sock). "Riavvia" needs no socket (clean exit).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg libgl1 libglib2.0-0 curl python3-pip build-essential python3-dev \
+        ffmpeg libgl1 libglib2.0-0 curl python3-pip build-essential python3-dev docker.io \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -38,12 +40,13 @@ RUN python3 -m pip install --upgrade pip && \
     grep -vE '^(onnxruntime|opencv-python|numpy|psycopg2)' requirements-jetson.txt > /tmp/req.txt && \
     python3 -m pip install -r /tmp/req.txt
 
-# protobuf C++ backend: the base ships protobuf 3.19.6 without the binary extension, so
-# onnx.load_model parses the ~317 MB buffalo_l models in pure-Python (~550 s per start). Force
-# the manylinux2014_aarch64 cp36 wheel (ships pyext/_message) so the parse drops to ~seconds.
-RUN python3 -m pip install --no-cache-dir --force-reinstall --only-binary=:all: "protobuf==3.19.6" && \
-    python3 -c "from google.protobuf.internal import api_implementation as a; print('protobuf backend:', a.Type())" \
-        || echo "WARN: protobuf C++ backend non disponibile (resta pure-Python, warmup lento)"
+# protobuf backend: the C++ extension (pyext/_message) makes onnx.load_model ~100x faster, but
+# protobuf 3.19.6 ships it only for py>=3.7 aarch64 wheels, NOT cp36 — so on this py3.6 base the
+# load stays pure-Python (~9 min, hidden by the background warm-up). Do NOT force
+# PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=cpp: with no _message it crashes (ImportError). With the
+# var UNSET, protobuf auto-picks cpp when the extension exists, so a future py3.8+ base is fast
+# for free. The reinstall just pins the wheel (pulls the cpp build on py>=3.7).
+RUN python3 -m pip install --no-cache-dir --force-reinstall --only-binary=:all: "protobuf==3.19.6" || true
 
 COPY . .
 
@@ -54,7 +57,6 @@ ENV DATA_DIR=/data \
     TRT_ENGINE_CACHE_DIR=/data/engines \
     USE_GPU=true \
     PERFORMANCE_PROFILE=standard \
-    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=cpp \
     LOG_LEVEL=INFO
 # InsightFace looks under ~/.insightface (base user is root): point it at the external disk.
 RUN mkdir -p /data && ln -sf /data/models /root/.insightface

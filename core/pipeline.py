@@ -64,7 +64,9 @@ class FaceIdPipeline:
             if now - self._last_reload < self._TEMPLATE_RELOAD_INTERVAL:
                 return
             with get_session() as session:
-                templates = PersonRepository(session).load_all_templates()
+                # Only templates from the active profile's recognition model (embeddings from a
+                # different pack are in an incompatible space → would never match).
+                templates = PersonRepository(session).load_all_templates(get_profile().model_pack)
                 projectors = {
                     p["camera_id"]: p["params"]
                     for p in CalibrationRepository(session).load_projectors()

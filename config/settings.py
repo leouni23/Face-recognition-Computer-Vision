@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     opt_tracker: bool = True                  # tracker IoU porta l'identità (salta il re-embed)
     opt_batch_embed: bool = True              # embedding di tutti i volti del frame in un passo
     trt_engine_cache_dir: str = ""            # vuoto → {data_dir}/engines (disco esterno)
+    # Fallback memoria: se onnxruntime r32.7 non libera le arene native al cambio profilo, esci
+    # in modo pulito e lascia che Docker (restart: unless-stopped) riparta sul nuovo profilo.
+    profile_switch_restart: bool = False      # PROFILE_SWITCH_RESTART=true per abilitare
 
     @property
     def cameras(self) -> List[str]:
