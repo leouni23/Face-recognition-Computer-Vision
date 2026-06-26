@@ -40,3 +40,6 @@ web/static/maps/
 
 # Artefatti runtime persistenti (DB, validation, benchmark, log) — montati come volume /data
 data/
+
+# Jetson deploy secrets/config
+.env.jetson
