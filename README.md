@@ -158,11 +158,7 @@ Apri **[http://localhost:8000](http://localhost:8000)** → in alto scegli **Sta
 python scripts/compare_sessions.py --json phase.json --csv phase.csv   # oppure il bottone "Confronta" in /validation
 ```
 
-**Controlli dalla UI (dashboard, in alto):** durante il caricamento modelli (~9 min al primo avvio / al cambio profilo) il feed è **già live** e una **barra mostra il progresso %** (auto-nascosta a fine caricamento; il riconoscimento parte da solo). Il bottone **⏻** in alto a destra → **Riavvia** (uscita pulita, Docker `--restart unless-stopped` riavvia) o **Spegni** (`docker stop`). Entrambi chiedono conferma e, se `WEB_PASSWORD` è impostata, la password. Per abilitare **Spegni** il container deve poter parlare con Docker: aggiungi in `run.sh` il mount del socket:
-
-```bash
-sudo docker run ... -v /var/run/docker.sock:/var/run/docker.sock ... faceid:jetson-tx2
-```
+**Controlli dalla UI (dashboard, in alto):** durante il caricamento modelli (~9 min al primo avvio / al cambio profilo) il feed è **già live** e una **barra mostra il progresso %** (auto-nascosta a fine caricamento; il riconoscimento parte da solo). Il bottone **⏻** in alto a destra → **Riavvia** (uscita pulita, Docker `restart: unless-stopped` riavvia) o **Spegni** (`docker stop`). Entrambi chiedono conferma e, se `WEB_PASSWORD` è impostata, la password. `docker-compose.jetson.yml` **monta già** il socket Docker e imposta `restart: unless-stopped`: con `docker compose -f docker-compose.jetson.yml up --build` **non serve alcun flag extra**. (Se avvii con un `run.sh` manuale invece del compose, aggiungi `-v /var/run/docker.sock:/var/run/docker.sock`.)
 
 > ⚠️ Il mount del socket dà al container accesso root all'host: usalo solo su box mono-utente e con `WEB_PASSWORD` impostata. Senza il socket, **Riavvia** funziona comunque; **Spegni** risponde 501.
 

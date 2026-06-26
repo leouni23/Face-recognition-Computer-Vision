@@ -34,5 +34,8 @@ services:
     volumes:
       # External disk -> /data : DB, models, TRT engines, validation artifacts. Never the eMMC.
       - ${EXT_DISK:?set EXT_DISK to the mounted external disk path}:/data
+      # Docker socket: lets the UI "Spegni" run `docker stop faceid` with no extra run flag.
+      # SECURITY: gives the container host-root via Docker. Single-user box only; set WEB_PASSWORD.
+      - /var/run/docker.sock:/var/run/docker.sock
     devices:
       - "/dev/video0:/dev/video0"          # USB/CSI camera; add more or use CAMERA_SOURCES=rtsp://...
