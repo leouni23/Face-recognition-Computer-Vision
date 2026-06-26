@@ -108,11 +108,20 @@ class CameraManager:
     # ── worker (was main._worker) ──────────────────────────────────────────────
     def _worker(self, cam: CameraStream, stop_ev: threading.Event) -> None:
         from ui.display import annotate_frame  # lazy: avoid core<->ui import cycle
+        from core import detector
         pipeline = self._pipeline
         rq = self.result_queues.get(cam.camera_id)
         while not stop_ev.is_set():
             frame = cam.read(timeout=0.1)
             if frame is None:
+                continue
+            if not detector.is_analyzer_ready():
+                # Models still warming up (~9 min). Show the live video without detection so the
+                # feed isn't black; don't call process_frame (it would block on the model load).
+                if self._web_mode:
+                    broadcaster.push_raw_frame(cam.camera_id, frame)
+                    if broadcaster.has_viewers(cam.camera_id):
+                        broadcaster.push_frame(cam.camera_id, frame)  # raw frame, no annotations
                 continue
             try:
                 results = pipeline.process_frame(frame, cam.camera_id)

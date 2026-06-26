@@ -96,6 +96,78 @@ FaceData = Tuple[FaceLocation, np.ndarray]  # location + 512-d ArcFace embedding
 _analyzer = None
 _analyzer_lock = threading.Lock()
 
+# Warm-up progress (model load is ~9 min on the TX2 pure-python protobuf base). Instrumented in
+# _build_analyzer; read by GET /api/warmup so the UI can show a % bar that auto-hides when ready.
+_warmup_state = {"active": False, "phase": "", "pct": 0.0, "eta_s": None, "ready": False}
+_warmup_lock = threading.Lock()
+
+
+def get_warmup_state() -> dict:
+    with _warmup_lock:
+        st = dict(_warmup_state)
+    st["ready"] = is_analyzer_ready()
+    return st
+
+
+def _warmup_set(**kw) -> None:
+    with _warmup_lock:
+        _warmup_state.update(kw)
+
+
+def _warmup_file() -> Path:
+    return Path(get_settings().data_dir) / "warmup_last.json"
+
+
+def _warmup_last_durations():
+    """(total_s, prepare_s) from the previous run, or (None, None)."""
+    try:
+        import json
+        d = json.loads(_warmup_file().read_text())
+        return d.get("total_s"), d.get("prepare_s")
+    except Exception:
+        return None, None
+
+
+def _warmup_save_durations(total_s: float, prepare_s: float) -> None:
+    try:
+        import json
+        _warmup_file().write_text(json.dumps({"total_s": round(total_s, 1),
+                                              "prepare_s": round(prepare_s, 1)}))
+    except Exception:
+        logger.debug("Impossibile salvare la durata warm-up")
+
+
+def _prepare_ramp(start: float, last_prep, stop_ev) -> None:
+    """Phase 2 (CUDA/TensorRT prepare is blocking, no native progress): advance pct 85→99 over the
+    last run's prepare duration."""
+    est = last_prep if last_prep and last_prep > 0 else 60.0
+    while not stop_ev.is_set():
+        frac = min(0.99, (time.perf_counter() - start) / float(est))
+        _warmup_set(pct=round(min(99.0, 85.0 + 14.0 * frac), 1))
+        if stop_ev.wait(0.5):
+            break
+
+
+def _warmup_done() -> None:
+    _warmup_set(active=False, ready=True, pct=100.0, phase="", eta_s=None)
+
+
+def _pack_onnx_total_bytes(pack: str) -> int:
+    """Sum of *.onnx sizes for the active pack, trying the usual InsightFace roots."""
+    roots = []
+    home = os.environ.get("INSIGHTFACE_HOME")
+    if home:
+        roots.append(Path(home) / "models" / pack)
+    roots.append(Path(os.path.expanduser("~/.insightface")) / "models" / pack)
+    for d in roots:
+        try:
+            files = list(d.glob("*.onnx"))
+            if files:
+                return sum(f.stat().st_size for f in files)
+        except Exception:
+            pass
+    return 0
+
 
 def _build_providers(want_gpu: bool, prof) -> list:
     """ONNX Runtime providers for the active profile. Standard → CUDA (or CPU). Optimized →
@@ -155,16 +227,60 @@ def _build_analyzer():
         f"InsightFace: profilo={prof.name} pack={prof.model_pack} "
         f"precisione={prof.precision} (providers={[p[0] if isinstance(p, tuple) else p for p in providers]})"
     )
-    instance = FaceAnalysis(
-        name=prof.model_pack,
-        allowed_modules=["detection", "recognition"],
-        providers=providers,
-    )
-    instance.prepare(
-        ctx_id=0 if want_gpu else -1,
-        det_size=(640, 640),
-        det_thresh=settings.det_threshold,
-    )
+
+    # ── warm-up progress: size-weighted ONNX parse (phase 1) + prepare ramp (phase 2) ──
+    t_begin = time.perf_counter()
+    prepare_s = 0.0
+    total_bytes = _pack_onnx_total_bytes(prof.model_pack)
+    last_total, last_prep = _warmup_last_durations()
+    _warmup_set(active=True, ready=False, phase="Caricamento modelli", pct=0.0,
+                eta_s=(int(last_total) if last_total else None))
+    loaded = {"b": 0}
+    import onnx
+    _orig_load = onnx.load
+    _orig_load_model = getattr(onnx, "load_model", None)
+
+    def _wrap(orig):
+        def inner(f, *a, **k):
+            r = orig(f, *a, **k)
+            try:
+                sz = os.path.getsize(f) if isinstance(f, str) else 0
+            except Exception:
+                sz = 0
+            loaded["b"] += sz
+            if total_bytes > 0:
+                _warmup_set(pct=round(85.0 * min(1.0, loaded["b"] / float(total_bytes)), 1))
+            return r
+        return inner
+
+    onnx.load = _wrap(_orig_load)
+    if _orig_load_model is not None:
+        onnx.load_model = _wrap(_orig_load_model)
+    stop_ramp = threading.Event()
+    try:
+        instance = FaceAnalysis(
+            name=prof.model_pack,
+            allowed_modules=["detection", "recognition"],
+            providers=providers,
+        )
+        _warmup_set(phase="Preparazione (CUDA/TensorRT)", pct=85.0)
+        prep_start = time.perf_counter()
+        threading.Thread(target=_prepare_ramp, args=(prep_start, last_prep, stop_ramp),
+                         daemon=True).start()
+        instance.prepare(
+            ctx_id=0 if want_gpu else -1,
+            det_size=(640, 640),
+            det_thresh=settings.det_threshold,
+        )
+        prepare_s = time.perf_counter() - prep_start
+    finally:
+        stop_ramp.set()
+        onnx.load = _orig_load
+        if _orig_load_model is not None:
+            onnx.load_model = _orig_load_model
+    _warmup_set(pct=99.0)
+    _warmup_save_durations(time.perf_counter() - t_begin, prepare_s)
+
     active = _active_providers(instance)
     if want_gpu and "CUDAExecutionProvider" not in active:
         logger.warning(
@@ -215,6 +331,7 @@ def _rebuild_worker() -> None:
                 old = _analyzer
                 _analyzer = new
             _dispose_analyzer(old)  # free the old onnxruntime/TensorRT native memory (TX2 8 GB)
+            _warmup_done()
             logger.info("InsightFace: nuovo profilo attivo (analyzer sostituito senza riavvio)")
             if get_settings().profile_switch_restart:
                 # Fallback: onnxruntime r32.7 may not release native arenas in-process. Exit so
@@ -224,6 +341,7 @@ def _rebuild_worker() -> None:
                 os._exit(0)
         except Exception:
             logger.exception("Ricostruzione profilo fallita; mantengo l'analyzer precedente")
+            _warmup_set(active=False)
         with _rebuild_state_lock:
             if _rebuild_again:
                 _rebuild_again = False
@@ -250,12 +368,20 @@ def reset_for_profile_change() -> None:
     threading.Thread(target=_rebuild_worker, daemon=True, name="profile-rebuild").start()
 
 
+def is_analyzer_ready() -> bool:
+    """True once InsightFace models are loaded (background warm-up / first build done). Lets the
+    camera worker skip detection without blocking on the (slow, ~9 min) model load → live feed
+    during warm-up. During a profile switch the OLD analyzer stays set, so this stays True."""
+    return _analyzer is not None
+
+
 def _get_analyzer():
     global _analyzer
     if _analyzer is None:
         with _analyzer_lock:
             if _analyzer is None:
                 _analyzer = _build_analyzer()
+                _warmup_done()
     return _analyzer
 
 def _faces_to_data(faces) -> List[FaceData]:

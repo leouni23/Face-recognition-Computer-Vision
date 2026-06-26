@@ -23,9 +23,11 @@ ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 # FFMPEG (RTSP) + OpenCV runtime libs + curl (healthcheck). build-essential/python3-dev for the
-# few pip extensions that compile on ARM (InsightFace/Cython, cryptography cffi).
+# few pip extensions that compile on ARM (InsightFace/Cython, cryptography cffi). docker.io = the
+# docker CLI only (daemon unused) so the UI "Spegni" can `docker stop` over the mounted host socket
+# (run.sh: -v /var/run/docker.sock:/var/run/docker.sock). "Riavvia" needs no socket (clean exit).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg libgl1 libglib2.0-0 curl python3-pip build-essential python3-dev \
+        ffmpeg libgl1 libglib2.0-0 curl python3-pip build-essential python3-dev docker.io \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

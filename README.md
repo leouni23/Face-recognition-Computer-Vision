@@ -158,6 +158,14 @@ Apri **[http://localhost:8000](http://localhost:8000)** → in alto scegli **Sta
 python scripts/compare_sessions.py --json phase.json --csv phase.csv   # oppure il bottone "Confronta" in /validation
 ```
 
+**Controlli dalla UI (dashboard, in alto):** durante il caricamento modelli (~9 min al primo avvio / al cambio profilo) il feed è **già live** e una **barra mostra il progresso %** (auto-nascosta a fine caricamento; il riconoscimento parte da solo). Il bottone **⏻** in alto a destra → **Riavvia** (uscita pulita, Docker `--restart unless-stopped` riavvia) o **Spegni** (`docker stop`). Entrambi chiedono conferma e, se `WEB_PASSWORD` è impostata, la password. Per abilitare **Spegni** il container deve poter parlare con Docker: aggiungi in `run.sh` il mount del socket:
+
+```bash
+sudo docker run ... -v /var/run/docker.sock:/var/run/docker.sock ... faceid:jetson-tx2
+```
+
+> ⚠️ Il mount del socket dà al container accesso root all'host: usalo solo su box mono-utente e con `WEB_PASSWORD` impostata. Senza il socket, **Riavvia** funziona comunque; **Spegni** risponde 501.
+
 > ℹ️ **Nota Python 3.6 (TX2).** L'immagine usa `requirements-jetson.txt` (pin compatibili 3.6: Flask 2.0, SQLAlchemy 1.4, pydantic v1, …) con shim che mantengono il codice identico su x86. Lo stack scientifico (scipy/scikit-image/onnx) su ARM cp36 può richiedere build lunghe se manca il wheel; in tal caso vedi la nota in DOCUMENTAZIONE §11. Se `TensorrtExecutionProvider` non è disponibile nel wheel, l'app ripiega su CUDA (segnalato nei log dei provider attivi).
 
 ---
