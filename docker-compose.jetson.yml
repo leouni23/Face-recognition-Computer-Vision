@@ -20,7 +20,7 @@ services:
     image: faceid:jetson-tx2
     container_name: faceid
     runtime: nvidia                       # mounts CUDA/cuDNN/TensorRT from the host
-    restart: unless-stopped
+    restart: always
     ports:
       - "8000:8000"
     environment:
