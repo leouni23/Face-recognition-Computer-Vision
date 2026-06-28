@@ -5,12 +5,14 @@
 #
 # Single image, profile selectable at runtime (Standard / Optimized-TX2). The base
 # dustynv/onnxruntime:r32.7.1 already ships, compiled for L4T r32.7: CUDA + cuDNN +
-# onnxruntime-gpu + numpy + OpenCV (the only ARM/L4T builds that actually work - the x86 pip
-# wheels do not). We add only the app code and the missing pure-Python deps from
-# requirements-jetson.txt (Python 3.6 pins). Models + TensorRT engines are NOT baked in: they
-# are downloaded / built on first run onto the external disk mounted at /data.
+# onnxruntime-gpu + numpy + OpenCV. BUT that base OpenCV (4.12) is built WITHOUT the FFMPEG and
+# GStreamer backends, so cv2.VideoCapture cannot open RTSP/RTMP/HTTP streams (verified:
+# `FFMPEG: NO`, `GStreamer: NO`). We therefore REBUILD OpenCV from source here with both backends
+# ON, replacing the base cv2 (see the "OpenCV from source" stage). USB cameras worked before via
+# V4L2; RTSP now works via the FFMPEG (software-decode) backend. Models + TensorRT engines are NOT
+# baked in: they are downloaded / built on first run onto the external disk mounted at /data.
 #
-#   Build (on the TX2):
+#   Build (on the TX2, FIRST build is long ~1-2h: it compiles OpenCV from source):
 #     sudo docker build -f Dockerfile.jetson -t faceid:jetson-tx2 .
 #   Run: use docker-compose.jetson.yml (mounts /data + the camera, --runtime nvidia).
 
@@ -30,7 +32,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg libgl1 libglib2.0-0 curl python3-pip build-essential python3-dev docker.io \
  && rm -rf /var/lib/apt/lists/*
 
+# ---------------------------------------------------------------------------------------------
+# OpenCV from source WITH FFMPEG + GStreamer (the base cv2 4.12 has neither -> RTSP is dead).
+# We rebuild opencv-python 4.5.5.64 (last release with cp36 support) through its own
+# scikit-build/cmake pipeline, forcing the backends ON via CMAKE_ARGS. Decode is software
+# (NVDEC/nvv4l2decoder is NOT in this container's gstreamer plugin set, so hardware decode is out
+# of scope). A separate verify step below FAILS the build if either backend is missing, so a
+# broken image never ships.
+#   - ENABLE_HEADLESS=1: no GUI/highgui (this runs as a web server; avoids GTK build deps).
+#   - WITH_CUDA=OFF: inference uses onnxruntime-gpu, not cv2.cuda; CUDA in cv2 would only add hours.
+#   - MAKEFLAGS=-j4: cap parallelism so the 8 GB TX2 doesn't OOM mid-compile.
+ENV ENABLE_CONTRIB=0 ENABLE_HEADLESS=1 MAKEFLAGS=-j4 \
+    CMAKE_ARGS="-DWITH_FFMPEG=ON -DWITH_GSTREAMER=ON -DWITH_V4L=ON -DWITH_LIBV4L=ON -DWITH_CUDA=OFF -DBUILD_opencv_python3=ON -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_DOCS=OFF -DOPENCV_GENERATE_PKGCONFIG=ON"
+
+# Build + runtime deps. The gstreamer1.0-plugins-* / gstreamer1.0-libav and the ffmpeg libs are
+# also needed at RUNTIME to actually decode, so we keep them (don't purge).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake pkg-config \
+        libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavresample-dev \
+        libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+        gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+        gstreamer1.0-libav gstreamer1.0-tools \
+        libv4l-dev libxvidcore-dev libx264-dev libjpeg-dev libpng-dev libtiff-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# Drop the base cv2 (4.12, no backends), then compile our backend-enabled build over it.
+RUN python3 -m pip install --upgrade pip setuptools wheel "scikit-build==0.13.1" \
+ && rm -rf /usr/local/lib/python3.6/dist-packages/cv2 \
+           /usr/local/lib/python3.6/dist-packages/opencv* \
+ && python3 -m pip install --no-cache-dir --force-reinstall --no-binary opencv-python "opencv-python==4.5.5.64"
+
+# Hard gate: abort the build unless BOTH backends are actually compiled in.
+RUN python3 -c "import cv2,sys; bi=cv2.getBuildInformation(); ff=[l for l in bi.splitlines() if l.strip().startswith('FFMPEG:')][0]; gs=[l for l in bi.splitlines() if l.strip().startswith('GStreamer:')][0]; print('OpenCV',cv2.__version__,'|',ff.strip(),'|',gs.strip()); sys.exit(0 if ('YES' in ff and 'YES' in gs) else 1)"
+# ---------------------------------------------------------------------------------------------
+
 WORKDIR /app
+
+# insightface 0.7.3 pulls opencv-python-headless>=4.1.1 transitively. No cp36 aarch64 wheel exists,
+# so pip would compile it from source (~70 min) AND clobber our backend-enabled cv2 with a
+# backend-less build. cv2 already comes from the opencv-python build above, so register a stub
+# dist-info marking the requirement satisfied -> pip skips the redundant build.
+RUN python3 -c "import os; d='/usr/local/lib/python3.6/dist-packages/opencv_python_headless-4.5.5.64.dist-info'; os.makedirs(d, exist_ok=True); open(d+'/METADATA','w').write('Metadata-Version: 2.1\nName: opencv-python-headless\nVersion: 4.5.5.64\n'); open(d+'/RECORD','w').close(); open(d+'/top_level.txt','w').write('cv2\n')"
 
 # Install ONLY the deps not already in the base. Exclude onnxruntime / opencv-python / numpy /
 # psycopg2 (provided by the base, or unused with SQLite). requirements-jetson.txt already omits
