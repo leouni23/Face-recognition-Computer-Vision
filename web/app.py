@@ -20,7 +20,9 @@ from core.camera_manager import camera_manager
 from core.detector import detect_and_encode, get_warmup_state, reset_for_profile_change
 from core.profile import OPTIMIZED, STANDARD, get_profile, profile_summary
 from core.geometry import compute_homography, solve_polar_calibration
-from core.validation import validation_manager, validation_root
+from core.validation import (
+    active_group, active_group_meta, close_group, start_group, validation_manager, validation_root,
+)
 from core.validation_metrics import compute_and_export
 from core.validation_presets import (
     delete_preset, duplicate_preset, load_presets, load_subjects, save_subjects, upsert_preset,
@@ -393,11 +395,21 @@ def api_metrics():
 # ── Validation / test mode ────────────────────────────────────────────────────
 
 def _session_dir(session_id: str):
-    """Resolve a session folder safely (reject path traversal)."""
+    """Resolve a session folder safely (reject path traversal). Nest-aware: a session lives either
+    directly under the root (legacy flat) or one level down inside a validation group."""
+    if "/" in session_id or "\\" in session_id or session_id in ("", ".", ".."):
+        return None
     root = validation_root().resolve()
-    target = (root / session_id).resolve()
-    if target.is_dir() and root in target.parents:
-        return target
+    if not root.is_dir():
+        return None
+    candidates = [root]
+    for d in root.iterdir():
+        if d.is_dir():
+            candidates.append(d)
+    for parent in candidates:
+        target = (parent / session_id).resolve()
+        if target.is_dir() and (target / "session.json").is_file() and root in target.parents:
+            return target
     return None
 
 
@@ -420,6 +432,8 @@ def validation_page():
 
 @app.route("/api/validation/start", methods=["POST"])
 def validation_start():
+    if active_group() is None:
+        return jsonify({"error": "Avvia prima una validazione"}), 409
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     if name and not _NAME_RE.match(name):
@@ -486,19 +500,106 @@ def validation_status():
     return jsonify(validation_manager.status())
 
 
-@app.route("/api/validation/sessions")
-def validation_sessions():
+def _read_session_manifests():
+    """All session.json manifests, flat (legacy) + nested one level under validation groups."""
     root = validation_root()
     out = []
-    if root.is_dir():
-        for d in sorted(root.iterdir(), reverse=True):
-            manifest = d / "session.json"
-            if manifest.is_file():
-                try:
-                    out.append(json.loads(manifest.read_text(encoding="utf-8")))
-                except Exception:
-                    pass
+    if not root.is_dir():
+        return out
+    for d in sorted(root.iterdir(), reverse=True):
+        if (d / "session.json").is_file():
+            out.append((d, None))
+        elif d.is_dir():
+            for sub in sorted(d.iterdir(), reverse=True):
+                if (sub / "session.json").is_file():
+                    out.append((sub, d.name))
+    res = []
+    for sdir, group in out:
+        try:
+            m = json.loads((sdir / "session.json").read_text(encoding="utf-8"))
+            m["group"] = group
+            res.append(m)
+        except Exception:
+            pass
+    return res
+
+
+@app.route("/api/validation/sessions")
+def validation_sessions():
+    return jsonify(_read_session_manifests())
+
+
+@app.route("/api/validation/group/active")
+def validation_group_active():
+    return jsonify({"active": active_group_meta()})
+
+
+@app.route("/api/validation/group/start", methods=["POST"])
+def validation_group_start():
+    data = request.get_json(silent=True) or {}
+    return jsonify(start_group(name=data.get("name", ""), is_test=bool(data.get("is_test")),
+                               notes=data.get("notes", "")))
+
+
+@app.route("/api/validation/group/close", methods=["POST"])
+def validation_group_close():
+    if validation_manager.is_active():
+        return jsonify({"error": "Ferma prima la sessione in corso"}), 409
+    return jsonify(close_group())
+
+
+@app.route("/api/validation/groups")
+def validation_groups():
+    """Validazioni (macro-group) each with their sessions; legacy flat sessions under a synthetic
+    "(senza validazione)" group. Built from the recursive scan (backward-compatible)."""
+    from core.compare import scan_sessions
+    groups = {}
+    order = []
+    for s in scan_sessions():
+        key = s.get("group") or "__flat__"
+        if key not in groups:
+            groups[key] = {
+                "folder": s.get("group"), "name": s.get("group_name") or "(senza validazione)",
+                "is_test": s.get("is_test", False), "sessions": [], "profiles": set(),
+            }
+            order.append(key)
+        g = groups[key]
+        g["sessions"].append(s)
+        if s.get("profile"):
+            g["profiles"].add(s["profile"])
+    active = active_group()
+    out = []
+    for key in order:
+        g = groups[key]
+        out.append({
+            "folder": g["folder"], "name": g["name"], "is_test": g["is_test"],
+            "active": g["folder"] == active, "n_sessions": len(g["sessions"]),
+            "profiles": sorted(g["profiles"]), "sessions": g["sessions"],
+        })
     return jsonify(out)
+
+
+@app.route("/api/validation/group/<vid>", methods=["DELETE"])
+def validation_group_delete(vid: str):
+    """Delete a TEST validation group + its sessions (confirm in UI). Non-test → 403."""
+    import shutil
+    if "/" in vid or "\\" in vid or vid in ("", ".", ".."):
+        return jsonify({"error": "id non valido"}), 400
+    root = validation_root().resolve()
+    gdir = (root / vid).resolve()
+    if not (gdir.is_dir() and root in gdir.parents and (gdir / "validation.json").is_file()):
+        return jsonify({"error": "Validazione non trovata"}), 404
+    try:
+        meta = json.loads((gdir / "validation.json").read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+    if not meta.get("is_test"):
+        return jsonify({"error": "Solo le validazioni di prova (test) sono eliminabili"}), 403
+    if active_group() == vid:
+        close_group()
+    shutil.rmtree(gdir, ignore_errors=True)
+    logger.info(f"[Validation] Gruppo di prova eliminato: {vid}")
+    return jsonify({"deleted": vid})
 
 
 @app.route("/api/validation/compare")

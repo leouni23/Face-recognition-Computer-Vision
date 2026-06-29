@@ -54,6 +54,92 @@ def set_destination(path: Optional[str]) -> Path:
     return validation_root()
 
 
+# ── Validation groups (macro layer above sessions) ───────────────────────────────
+# A "validazione" is a named container folder under validation_root(); sessions nest inside it,
+# unchanged. The active group is a marker file under the root (survives restart). New sessions are
+# only allowed inside an active group; legacy flat sessions stay readable (backward-compat).
+_ACTIVE_MARKER = ".active_validation"
+
+
+def _slugify(name: str) -> str:
+    safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in (name or "").strip())
+    safe = "-".join(p for p in safe.split("-") if p)  # collapse repeats
+    return safe[:40] or "validazione"
+
+
+def active_group() -> Optional[str]:
+    """Folder name of the active validation group, or None. Read from the marker on disk."""
+    try:
+        marker = validation_root() / _ACTIVE_MARKER
+        if marker.is_file():
+            name = marker.read_text(encoding="utf-8").strip()
+            if name and (validation_root() / name).is_dir():
+                return name
+    except Exception:
+        pass
+    return None
+
+
+def active_group_meta() -> Optional[dict]:
+    ag = active_group()
+    if ag is None:
+        return None
+    try:
+        meta = json.loads((validation_root() / ag / "validation.json").read_text(encoding="utf-8"))
+    except Exception:
+        meta = {"validation_id": ag, "name": ag}
+    meta["folder"] = ag
+    meta["session_count"] = _group_session_count(ag)
+    return meta
+
+
+def _group_session_count(folder: str) -> int:
+    d = validation_root() / folder
+    if not d.is_dir():
+        return 0
+    return sum(1 for s in d.iterdir() if (s / "session.json").is_file())
+
+
+def start_group(name: str, is_test: bool = False, notes: str = "") -> dict:
+    """Create a validation group folder + manifest and mark it active. Default name = timestamp."""
+    now = datetime.now()
+    name = (name or "").strip() or now.strftime("Validazione %Y-%m-%d %H:%M")
+    validation_id = now.strftime("val_%Y%m%d_%H%M%S")
+    folder = "{}__{}".format(validation_id, _slugify(name))
+    root = validation_root()
+    root.mkdir(parents=True, exist_ok=True)
+    gdir = root / folder
+    gdir.mkdir(parents=False, exist_ok=True)
+    meta = {
+        "validation_id": validation_id, "name": name, "created_at": now.isoformat(),
+        "closed_at": None, "notes": notes or "", "is_test": bool(is_test),
+    }
+    (gdir / "validation.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    (root / _ACTIVE_MARKER).write_text(folder, encoding="utf-8")
+    logger.success("[Validation] Gruppo avviato: {} ({})".format(name, folder))
+    return {**meta, "folder": folder, "session_count": 0}
+
+
+def close_group() -> dict:
+    """Write closed_at on the active group and clear the active marker."""
+    ag = active_group()
+    root = validation_root()
+    if ag is not None:
+        try:
+            mf = root / ag / "validation.json"
+            meta = json.loads(mf.read_text(encoding="utf-8"))
+            meta["closed_at"] = datetime.now().isoformat()
+            mf.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        except Exception:
+            logger.debug("close_group: manifest non aggiornato")
+    try:
+        (root / _ACTIVE_MARKER).unlink()
+    except OSError:
+        pass
+    logger.success("[Validation] Gruppo chiuso: {}".format(ag))
+    return {"closed": ag}
+
+
 def _configured_cameras() -> List[str]:
     """Enabled cameras from the runtime registry (fallback: CAMERA_SOURCES). Lazy import keeps
     core.validation free of a hard dependency on the camera manager."""
@@ -341,8 +427,14 @@ class ValidationManager:
             except OSError as exc:
                 raise RuntimeError(f"Impossibile usare la root di validazione {root}: {exc}")
 
+            # Nest the session inside the active validation group (mandatory via the API; the CLI
+            # --validation path may still run flat for backward-compat).
+            ag = active_group()
+            parent = (root / ag) if ag else root
+            parent.mkdir(parents=True, exist_ok=True)
+
             # Never overwrite a session: create a NEW folder, appending _2/_3… on any collision.
-            self._dir = root / base
+            self._dir = parent / base
             n = 1
             while True:
                 try:
@@ -350,7 +442,7 @@ class ValidationManager:
                     break
                 except FileExistsError:
                     n += 1
-                    self._dir = root / f"{base}_{n}"
+                    self._dir = parent / f"{base}_{n}"
                 except OSError as exc:
                     raise RuntimeError(f"Impossibile creare la cartella di sessione in {root}: {exc}")
             session_id = self._dir.name  # actual id (possibly suffixed)

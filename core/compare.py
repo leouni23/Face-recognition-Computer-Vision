@@ -44,14 +44,15 @@ def scan_sessions(root: Optional[Path] = None) -> List[dict]:
     out: List[dict] = []
     if not root.is_dir():
         return out
-    for d in sorted(root.iterdir()):
+
+    def _emit(d, group):
         manifest = d / "session.json"
         if not manifest.is_file():
-            continue
+            return
         try:
             meta = json.loads(manifest.read_text(encoding="utf-8"))
         except Exception:
-            continue
+            return
         perf = meta.get("performance") or {}
         out.append({
             "session_id": meta.get("session_id", d.name),
@@ -63,7 +64,26 @@ def scan_sessions(root: Optional[Path] = None) -> List[dict]:
             "presets": list((meta.get("presets") or {}).keys()),
             "start": meta.get("start"),
             "threshold": meta.get("threshold"),
+            # macro-group (validation) the session belongs to; None = legacy flat session
+            "group": (group or {}).get("folder"),
+            "group_name": (group or {}).get("name"),
+            "is_test": bool((group or {}).get("is_test")),
         })
+
+    for d in sorted(root.iterdir()):
+        if (d / "session.json").is_file():
+            _emit(d, None)                         # legacy flat session
+        elif d.is_dir():                           # validation group → recurse one level
+            group = None
+            vf = d / "validation.json"
+            if vf.is_file():
+                try:
+                    g = json.loads(vf.read_text(encoding="utf-8"))
+                    group = {"folder": d.name, "name": g.get("name", d.name), "is_test": g.get("is_test")}
+                except Exception:
+                    group = {"folder": d.name, "name": d.name, "is_test": False}
+            for sub in sorted(d.iterdir()):
+                _emit(sub, group)
     return out
 
 
