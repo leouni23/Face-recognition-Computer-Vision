@@ -137,6 +137,22 @@ def _warmup_save_durations(total_s: float, prepare_s: float) -> None:
         logger.debug("Impossibile salvare la durata warm-up")
 
 
+def _load_ramp(start: float, est_load, stop_ev) -> None:
+    """Phase 1 (ONNX protobuf parse is atomic pure-Python, no native progress): advance pct 0→85
+    over the previous run's load duration. The onnx.load hook (size-weighted) can push pct ahead;
+    we use max() so the bar never moves backward. eta_s counts down off the same estimate."""
+    est = est_load if est_load and est_load > 0 else 480.0   # ~8min default on TX2 (no prior run)
+    while not stop_ev.is_set():
+        elapsed = time.perf_counter() - start
+        frac = min(1.0, elapsed / float(est))
+        with _warmup_lock:
+            cur = _warmup_state.get("pct", 0.0)
+            _warmup_state["pct"] = round(max(cur, 85.0 * frac), 1)
+            _warmup_state["eta_s"] = max(0, int(est - elapsed))
+        if stop_ev.wait(0.5):
+            break
+
+
 def _prepare_ramp(start: float, last_prep, stop_ev) -> None:
     """Phase 2 (CUDA/TensorRT prepare is blocking, no native progress): advance pct 85→99 over the
     last run's prepare duration."""
@@ -233,6 +249,7 @@ def _build_analyzer():
     prepare_s = 0.0
     total_bytes = _pack_onnx_total_bytes(prof.model_pack)
     last_total, last_prep = _warmup_last_durations()
+    est_load = (last_total - (last_prep or 0.0)) if last_total else None  # load = total − prepare (prep may be ~0 on CPU)
     _warmup_set(active=True, ready=False, phase="Caricamento modelli", pct=0.0,
                 eta_s=(int(last_total) if last_total else None))
     loaded = {"b": 0}
@@ -249,7 +266,9 @@ def _build_analyzer():
                 sz = 0
             loaded["b"] += sz
             if total_bytes > 0:
-                _warmup_set(pct=round(85.0 * min(1.0, loaded["b"] / float(total_bytes)), 1))
+                want = round(85.0 * min(1.0, loaded["b"] / float(total_bytes)), 1)
+                with _warmup_lock:          # max(): never drag the bar below the time ramp
+                    _warmup_state["pct"] = max(_warmup_state.get("pct", 0.0), want)
             return r
         return inner
 
@@ -257,12 +276,17 @@ def _build_analyzer():
     if _orig_load_model is not None:
         onnx.load_model = _wrap(_orig_load_model)
     stop_ramp = threading.Event()
+    stop_load = threading.Event()
+    # Phase-1 time ramp: drives pct 0→85 while the atomic ONNX parse blocks with no native progress.
+    threading.Thread(target=_load_ramp, args=(time.perf_counter(), est_load, stop_load),
+                     daemon=True).start()
     try:
         instance = FaceAnalysis(
             name=prof.model_pack,
             allowed_modules=["detection", "recognition"],
             providers=providers,
         )
+        stop_load.set()                       # models loaded → end phase-1 ramp before phase 2
         _warmup_set(phase="Preparazione (CUDA/TensorRT)", pct=85.0)
         prep_start = time.perf_counter()
         threading.Thread(target=_prepare_ramp, args=(prep_start, last_prep, stop_ramp),
@@ -274,6 +298,7 @@ def _build_analyzer():
         )
         prepare_s = time.perf_counter() - prep_start
     finally:
+        stop_load.set()
         stop_ramp.set()
         onnx.load = _orig_load
         if _orig_load_model is not None:
