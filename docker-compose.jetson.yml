@@ -37,5 +37,7 @@ services:
       # Docker socket: lets the UI "Spegni" run `docker stop faceid` with no extra run flag.
       # SECURITY: gives the container host-root via Docker. Single-user box only; set WEB_PASSWORD.
       - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["python3", "main.py", "--web", "--host", "0.0.0.0"]
     devices:
-      - "/dev/video0:/dev/video0"          # USB/CSI camera; add more or use CAMERA_SOURCES=rtsp://...
+      - "/dev/video1:/dev/video0"          # USB UVC camera (Logitech); CSI /dev/video0 needs nvargus-daemon (unavailable in container)
+
