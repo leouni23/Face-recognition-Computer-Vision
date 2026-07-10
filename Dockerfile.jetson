@@ -105,6 +105,6 @@ RUN mkdir -p /data && ln -sf /data/models /root/.insightface
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-    CMD curl -fsS http://localhost:8000/api/cameras || exit 1
+    CMD curl -fsS http://localhost:8000/healthz || exit 1
 
 CMD ["python3", "main.py", "--web", "--host", "0.0.0.0"]

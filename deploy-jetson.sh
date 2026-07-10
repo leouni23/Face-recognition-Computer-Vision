@@ -34,6 +34,12 @@ if [ ! -d "$EXT_DISK" ]; then
   echo "ATTENZIONE: disco esterno $EXT_DISK non montato (modelli/engine/dati vanno li')." >&2
 fi
 
+# Bootstrap: le sottocartelle DEVONO esistere prima del primo avvio, altrimenti il symlink
+# /root/.insightface -> /data/models punta nel vuoto e il warm-up modelli crasha.
+mkdir -p "$EXT_DISK/models" "$EXT_DISK/engines" "$EXT_DISK/validation" 2>/dev/null \
+  || sudo mkdir -p "$EXT_DISK/models" "$EXT_DISK/engines" "$EXT_DISK/validation"
+[ -w "$EXT_DISK/models" ] || sudo chmod -R a+rwX "$EXT_DISK/models" "$EXT_DISK/engines" "$EXT_DISK/validation" || true
+
 # Max performance (best-effort; ignore if not a Jetson / no sudo).
 sudo nvpmodel -m 0 >/dev/null 2>&1 || true
 sudo jetson_clocks  >/dev/null 2>&1 || true

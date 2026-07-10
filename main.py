@@ -7,9 +7,11 @@ Usage:
   python main.py --web --local    # both web UI and local windows
 """
 import argparse
+import os
 import queue
 import sys
 import threading
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -74,6 +76,21 @@ def main() -> None:
             f"Web UI esposta su {args.host} SENZA autenticazione: chiunque sulla rete può vedere "
             "le camere e gestire i dati biometrici. Imposta WEB_PASSWORD nel file .env"
         )
+
+    # Bootstrap difensivo: models/engines/validation DEVONO esistere (il symlink
+    # /root/.insightface -> /data/models altrimenti pende e il warm-up crasha su disco vuoto).
+    # /data non scrivibile = errore fatale esplicito — MAI fallback silenzioso su eMMC.
+    data_root = Path(_settings.data_dir)
+    try:
+        for sub in ("models", "engines", "validation"):
+            (data_root / sub).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.error(f"DATA_DIR {data_root} non scrivibile ({exc}): monta il disco esterno "
+                     "e riavvia. Nessun fallback su storage interno.")
+        sys.exit(1)
+    if not os.access(str(data_root), os.W_OK):
+        logger.error(f"DATA_DIR {data_root} non scrivibile: monta il disco esterno e riavvia.")
+        sys.exit(1)
 
     Base.metadata.create_all(engine)
     migrate_schema()  # idempotent: adds FaceTemplate.model_pack to an existing DB

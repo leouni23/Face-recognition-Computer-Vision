@@ -48,6 +48,10 @@ app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # upload max 10 MB
 
 @app.before_request
 def _guard_request():
+    # /healthz è l'UNICO path esente da autenticazione: serve al HEALTHCHECK Docker (che non ha
+    # credenziali) e non espone alcun dato sensibile. Ogni altro path resta protetto.
+    if request.path == "/healthz":
+        return None
     # CSRF: rifiuta richieste cross-site che modificano lo stato (Sec-Fetch-Site è
     # impostato dai browser moderni e non è falsificabile da una pagina malevola)
     if request.method in ("POST", "PUT", "PATCH", "DELETE") and \
@@ -458,6 +462,18 @@ def validation_start():
     name = (data.get("name") or "").strip()
     if name and not _NAME_RE.match(name):
         return jsonify({"error": "Nome sessione non valido"}), 400
+    # Destination is MANDATORY server-side (it was UI-only → curl could start onto nothing):
+    # resolve the effective destination (request or the configured VALIDATION_DIR default) and
+    # RE-validate it NOW — a disk validated in the wizard may have been unmounted since.
+    destination = (data.get("destination") or "").strip() or None
+    if destination is None and _settings.validation_dir.strip():
+        destination = str(Path(_settings.validation_dir.strip()).parent)
+    if destination is None:
+        return jsonify({"error": "Selezionare e validare una destinazione prima di avviare"}), 400
+    v = validate_target(destination)
+    if not v.get("ok"):
+        return jsonify({"error": "Destinazione non valida allo start: "
+                        + "; ".join(v.get("errors") or ["sconosciuto"])}), 400
     trial_subjects = _resolve_trial_subjects(data.get("subjects"))
     with get_session() as session:
         enrolled = [
@@ -805,6 +821,15 @@ def settings_profile():
     persisted = _persist_env("PERFORMANCE_PROFILE", value)
     logger.info(f"[Settings] PERFORMANCE_PROFILE = {value} (persistito nel .env: {persisted})")
     return jsonify({"persisted": persisted, **profile_summary()})
+
+
+@app.route("/healthz")
+def healthz():
+    """Unauthenticated liveness probe for the Docker HEALTHCHECK (the previous target was
+    auth-gated -> permanent 401 -> container flagged unhealthy). No sensitive data."""
+    w = get_warmup_state()
+    return jsonify({"status": "ok", "warmup_ready": bool(w.get("ready")),
+                    "warmup_active": bool(w.get("active"))})
 
 
 @app.route("/api/warmup")
