@@ -10,6 +10,7 @@ import os
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -100,6 +101,18 @@ _analyzer_lock = threading.Lock()
 # _build_analyzer; read by GET /api/warmup so the UI can show a % bar that auto-hides when ready.
 _warmup_state = {"active": False, "phase": "", "pct": 0.0, "eta_s": None, "ready": False}
 _warmup_lock = threading.Lock()
+
+# What the current analyzer ACTUALLY loaded (pack/precision/providers) — set at the end of every
+# _build_analyzer. Read by GET /api/settings/profile/status so the UI can verify the requested
+# profile really took effect (green light) instead of trusting settings (buffalo_l incident).
+_loaded_info = {"model_pack": None, "precision": None, "providers": [], "profile": None,
+                "loaded_at": None}
+_loaded_lock = threading.Lock()
+
+
+def get_loaded_info() -> dict:
+    with _loaded_lock:
+        return dict(_loaded_info)
 
 
 def get_warmup_state() -> dict:
@@ -317,6 +330,14 @@ def _build_analyzer():
         f"InsightFace: modelli pronti (provider attivi={sorted(active)}, "
         f"det_thresh={settings.det_threshold}, min_face_px={settings.min_face_px})"
     )
+    # Ground truth of what is ACTUALLY loaded (semaforo UI): the buffalo_l lab incident happened
+    # because settings said one thing and nothing showed what the analyzer really ran.
+    with _loaded_lock:
+        _loaded_info.update({
+            "model_pack": prof.model_pack, "precision": prof.precision,
+            "providers": sorted(active), "profile": prof.name,
+            "loaded_at": datetime.now().isoformat(),
+        })
     return instance
 
 

@@ -65,6 +65,8 @@
       <button id="prof-standard" onclick="setProfile('standard')" class="px-3 py-1 bg-gray-800 hover:bg-gray-700">Standard</button>
       <button id="prof-optimized-tx2" onclick="setProfile('optimized-tx2')" class="px-3 py-1 bg-gray-800 hover:bg-gray-700 border-l border-gray-700">Optimized-TX2</button>
     </div>
+    <span id="prof-light" title="Stato profilo" style="display:inline-block;width:.65rem;height:.65rem;border-radius:9999px;background:#6b7280"></span>
+    <span id="prof-verified" class="text-gray-500"></span>
     <span id="prof-detail" class="text-gray-500"></span>
     <button onclick="openCamModal()" class="ml-auto px-3 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700">🎥 Gestione videocamere</button>
     <span id="cam-sources" class="text-gray-600"></span>
@@ -100,6 +102,25 @@
         document.getElementById('cam-sources').textContent='Camere: '+(on.length?on.map(c=>c.name).join(', '):'nessuna');
       }).catch(()=>{});
     }
+    // ── Semaforo profilo: verde solo quando il pack CARICATO coincide col profilo richiesto ──
+    function pollProfileStatus(){
+      fetch('/api/settings/profile/status').then(r=>r.json()).then(s=>{
+        const dot=document.getElementById('prof-light'), v=document.getElementById('prof-verified');
+        const L=s.loaded||{};
+        if (s.state==='switching'){ dot.style.background='#ef4444'; v.textContent='caricamento profilo…'; v.className='text-red-400'; }
+        else if (s.state==='ok'){
+          dot.style.background='#10b981';
+          const trt=(L.providers||[]).some(p=>p.indexOf('Tensorrt')===0);
+          v.textContent = `${L.profile} · ${L.model_pack} · ${L.precision}` + (trt?' · TensorRT ✓':'');
+          v.className='text-emerald-400';
+        } else { // mismatch: configurazione silenziosamente NON applicata
+          dot.style.background='#f59e0b';
+          v.textContent = `⚠ caricato ${L.model_pack||'?'} / ${L.precision||'?'} ≠ richiesto ${(s.requested||{}).model_pack} / ${(s.requested||{}).precision}`;
+          v.className='text-amber-400 font-semibold';
+        }
+      }).catch(()=>{});
+    }
+    pollProfileStatus(); setInterval(pollProfileStatus, 2000);
     refreshCamSummary();
     loadProfile();
 

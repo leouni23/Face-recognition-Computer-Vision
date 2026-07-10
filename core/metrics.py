@@ -310,10 +310,14 @@ def detect_platform_label() -> str:
     Auto-detected so each validation session records where it ran. Reuses the resource
     provider's backend/GPU name; on Jetson the board is read from the device tree.
     """
+    # Device-tree FIRST: inside the container tegrastats may be unreadable (backend falls back to
+    # psutil) but /proc/device-tree/model is always there → without this a TX2 run was mislabelled
+    # "arm64-cpu" in every session manifest.
+    jm = _jetson_model()
+    if jm:
+        return jm
     metrics = get_resource_metrics()
     backend = metrics.get("backend")
-    if backend == _TegrastatsProvider.backend:
-        return _jetson_model() or "jetson"
     if backend == _NvmlProvider.backend and metrics.get("gpu_name"):
         return f"{_arch()}-{_slug_gpu(metrics['gpu_name'])}"
     return f"{_arch()}-cpu"
