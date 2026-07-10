@@ -634,6 +634,29 @@ di bottiglia di memoria); `scripts/generate_report.py` produce `performance_repo
 sezione intrusività. Opzionale host-side: `trtexec --loadEngine=... --dumpProfile` per i per-layer
 TensorRT.
 
+### 11.6 Fix operativi post-deploy TX2
+
+- **Bootstrap dischi:** `deploy-jetson.sh` e l'avvio dell'app creano `models/engines/validation`
+  sotto `EXT_DISK`/`DATA_DIR` (SD vuota → il symlink `~/.insightface` non pende più); `/data` non
+  scrivibile = **errore fatale esplicito**, mai fallback su eMMC.
+- **Healthcheck:** `GET /healthz` è l'unico endpoint **esente da autenticazione** (liveness Docker;
+  nessun dato sensibile). Il HEALTHCHECK dell'immagine punta lì (prima colpiva un endpoint
+  auth-gated → 401 → container `unhealthy` permanente).
+- **Etichetta piattaforma:** `platform` nel manifest = modello board da device-tree + suffisso dai
+  provider REALI della sessione (`jetson-tx2-trt`/`-gpu`/`-cpu`; stessa fonte del semaforo);
+  refresh allo stop della sessione. Mai più `arm64-cpu` fasullo.
+- **perf_event nel container:** il seccomp di default di Docker consente `perf_event_open` solo
+  con CAP_SYS_ADMIN (e il kernel 4.9 di L4T r32 non ha CAP_PERFMON). Il compose usa
+  `security_opt: seccomp:./docker/seccomp-perf.json` = profilo default moby + quella sola syscall.
+  `seccomp:unconfined` va usato SOLO come fallback diagnostico. I log di `core/perfcounters.py`
+  distinguono paranoid host vs seccomp.
+- **Filtro dischi:** `/api/storage/drives` legge `/proc/mounts` e mostra solo partizioni reali
+  (device `/dev/*`, fstype ext/vfat/exfat/ntfs/…, dedup per device col mountpoint più corto,
+  test di scrittura reale) — niente più bind-mount del container tipo `/etc/hosts`.
+- **Destinazione obbligatoria lato server:** `POST /api/validation/start` risponde **400** senza
+  destinazione (request o `VALIDATION_DIR`) e **ri-valida** la destinazione allo start
+  (esistente+scrivibile) — l'obbligo non è più solo nel wizard.
+
 ---
 
 ## 12. Bot Telegram

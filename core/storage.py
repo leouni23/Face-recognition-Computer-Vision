@@ -48,8 +48,83 @@ def classify_fs(fstype: str) -> str:
     return "other"
 
 
+# Real block filesystems the operator can pick as destination. Everything else in a container is
+# overlay/tmpfs/bind-mount noise (/etc/hosts, docker.sock, /proc, cgroups, ...).
+_REAL_FS = {"ext2", "ext3", "ext4", "vfat", "exfat", "ntfs", "fuseblk", "btrfs", "xfs", "f2fs"}
+_EXCLUDED_PREFIXES = ("/proc", "/sys", "/run", "/dev", "/snap", "/boot", "/etc", "/var/lib/docker", "/app")
+
+
+def _writable(mp: str) -> bool:
+    """Real write test: os.access can lie on FAT/fuse mounts, so try an actual touch."""
+    if not os.access(mp, os.W_OK):
+        return False
+    probe = os.path.join(mp, ".faceid_wtest")
+    try:
+        with open(probe, "w") as f:
+            f.write("x")
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
+
+
 def list_drives() -> List[dict]:
-    """Currently mounted real partitions: mountpoint, fstype, fs class, total/free bytes."""
+    """Mounted REAL partitions only (the operator must see sensible destinations: SD, USB, eMMC —
+    not the container's bind-mounts like /etc/hosts or overlay roots). Reads /proc/mounts:
+    device must start with /dev/, fstype in the real-fs whitelist, system paths excluded,
+    deduplicated per device keeping the SHORTEST mountpoint (sub-binds of /data collapse)."""
+    try:
+        lines = Path("/proc/mounts").read_text().splitlines()
+    except Exception:
+        return _list_drives_psutil()  # non-Linux dev machine fallback
+
+    by_device: dict = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        device, mp_raw, fstype = parts[0], parts[1], parts[2].lower()
+        mp = mp_raw.replace("\\040", " ")  # /proc/mounts escapes spaces
+        if not device.startswith("/dev/"):
+            continue
+        if fstype not in _REAL_FS:
+            continue
+        if mp != "/" and mp.startswith(_EXCLUDED_PREFIXES):
+            continue
+        prev = by_device.get(device)
+        if prev is None or len(mp) < len(prev):
+            by_device[device] = mp
+
+    out: List[dict] = []
+    seen_mp = set()
+    for device, mp in sorted(by_device.items()):
+        if mp in seen_mp:
+            continue
+        seen_mp.add(mp)
+        # re-read fstype for the kept mountpoint
+        fstype = next((l.split()[2] for l in lines
+                       if l.split()[0] == device and l.split()[1] == mp), "?")
+        try:
+            st = os.statvfs(mp)
+            total = st.f_blocks * st.f_frsize
+            free = st.f_bavail * st.f_frsize
+        except OSError:
+            total = free = None
+        out.append({
+            "device": device,
+            "mountpoint": mp,
+            "fstype": fstype,
+            "fs_class": classify_fs(fstype),
+            "total_bytes": total,
+            "free_bytes": free,
+            "writable": _writable(mp),
+            "removable": "/mmcblk" not in device and ("/sd" in device or "/usb" in device.lower()),
+        })
+    return out
+
+
+def _list_drives_psutil() -> List[dict]:
+    """Legacy psutil path (non-Linux dev machines)."""
     import psutil
 
     out: List[dict] = []
@@ -71,6 +146,7 @@ def list_drives() -> List[dict]:
             "fs_class": classify_fs(part.fstype),
             "total_bytes": total,
             "free_bytes": free,
+            "writable": os.access(mp, os.W_OK),
             "removable": "removable" in (part.opts or "") or False,
         })
     return out
