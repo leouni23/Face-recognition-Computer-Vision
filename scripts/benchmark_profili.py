@@ -22,6 +22,39 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+# ── preflight (Task ARM-proof): fallisce SUBITO con elenco chiaro, mai a meta' run ──
+
+def preflight(verbose=True):
+    """Verifica import + modelli. Ritorna lista problemi (vuota = ok)."""
+    problems = []
+    for mod in ("numpy", "cv2", "onnxruntime", "insightface"):
+        try:
+            __import__(mod)
+        except Exception as exc:
+            problems.append("modulo mancante/rotto: {} ({})".format(mod, exc))
+    try:
+        from core.perfcounters import perf_counters
+        if verbose:
+            print("perf_event: {}".format("disponibile" if perf_counters.available
+                                          else "NON disponibile (--cap-add PERFMON per abilitare)"))
+    except Exception as exc:
+        problems.append("core.perfcounters non importabile: {}".format(exc))
+    home = os.environ.get("INSIGHTFACE_HOME", "/data/models")
+    if not Path(home).is_dir():
+        problems.append("INSIGHTFACE_HOME non esiste: {}".format(home))
+    else:
+        for pack in ("buffalo_l", "buffalo_s"):
+            d = Path(home) / "models" / pack
+            if not (d.is_dir() and list(d.glob("*.onnx"))):
+                problems.append("pack {} assente in {}/models (verra' scaricato al primo uso)".format(pack, home))
+    if verbose:
+        for p in problems:
+            print("[PREFLIGHT] " + p)
+        if not problems:
+            print("[PREFLIGHT] OK — tutte le dipendenze presenti")
+    return problems
+
+
 # ── provider selection ──────────────────────────────────────────────────────
 
 def _available_providers():
@@ -140,6 +173,48 @@ def _process_frame(analyzer, frame) -> dict:
         return {"detect_ms": total, "embed_ms": 0.0, "total_ms": total, "n_faces": len(faces)}
 
 
+# ── ORT built-in per-operator profiling (Tier B: MAI durante sessioni di accuratezza) ────────
+
+def _ort_op_profile(pack, providers, insightface_home, out_dir, n=50):
+    """Per-operator timings via SessionOptions.enable_profiling on RAW det+rec sessions of the
+    pack (synthetic inputs of the right shape — profiles the GRAPH, per-op bottleneck view).
+    Returns {det: [top ops], rec: [...]}; raw ORT profile JSONs are kept next to the output."""
+    import onnxruntime as ort
+    pack_dir = Path(insightface_home) / "models" / pack
+    targets = {}
+    for f in sorted(pack_dir.glob("*.onnx")):
+        name = f.name.lower()
+        if name.startswith("det_"):
+            targets["det"] = (str(f), (1, 3, 640, 640))
+        elif name.startswith("w600k"):
+            targets["rec"] = (str(f), (1, 3, 112, 112))
+    result = {}
+    for key, (path, shape) in targets.items():
+        try:
+            so = ort.SessionOptions()
+            so.enable_profiling = True
+            so.profile_file_prefix = str(Path(out_dir) / "ortprof_{}_{}".format(pack, key))
+            sess = ort.InferenceSession(path, sess_options=so, providers=[
+                p if not isinstance(p, tuple) else p[0] for p in providers])
+            inp = sess.get_inputs()[0]
+            x = np.random.rand(*shape).astype(np.float32)
+            for _ in range(n):
+                sess.run(None, {inp.name: x})
+            prof_file = sess.end_profiling()
+            events = json.loads(Path(prof_file).read_text())
+            agg = {}
+            for e in events:
+                if e.get("cat") == "Node":
+                    op = e.get("args", {}).get("op_name", e.get("name", "?"))
+                    agg[op] = agg.get(op, 0) + e.get("dur", 0)
+            top = sorted(agg.items(), key=lambda kv: -kv[1])[:10]
+            result[key] = {"profile_file": prof_file,
+                           "top_ops_us": [{"op": k, "total_us": v} for k, v in top]}
+        except Exception as exc:
+            result[key] = {"error": str(exc)}
+    return result
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 def run(args):
@@ -196,13 +271,35 @@ def run(args):
     for frame in frames[:n_warmup]:
         _process_frame(analyzer, frame)
 
-    # ── 6. Misura ──
-    print(f"Misura: {n_frames} frame...")
+    # ── 6. Misura (con cicli/istruzioni CPU per inferenza, se perf_event disponibile) ──
+    from core.perfcounters import perf_counters
+    print(f"Misura: {n_frames} frame... (perf_event: {'on' if perf_counters.available else 'off'})")
     rows = []
     t_wall_start = time.perf_counter()
     for frame in frames[n_warmup:n_warmup + n_frames]:
-        rows.append(_process_frame(analyzer, frame))
+        c0 = perf_counters.snap()
+        r = _process_frame(analyzer, frame)
+        c1 = perf_counters.snap()
+        if c0 is not None and c1 is not None:
+            r["cycles"] = c1[0] - c0[0]
+            r["instructions"] = c1[1] - c0[1]
+        rows.append(r)
     t_wall = time.perf_counter() - t_wall_start
+
+    # ── 6b. Overhead della telemetria Tier-A (snap perf) misurato, per il report ──
+    overhead_pct = None
+    if perf_counters.available and len(frames) > n_warmup:
+        probe = frames[n_warmup:n_warmup + min(50, n_frames)]
+        t0 = time.perf_counter()
+        for f in probe:
+            _process_frame(analyzer, f)
+        base = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        for f in probe:
+            a = perf_counters.snap(); _process_frame(analyzer, f); perf_counters.snap()
+        instr = time.perf_counter() - t0
+        if base > 0:
+            overhead_pct = round(max(0.0, (instr - base) / base) * 100.0, 2)
 
     # ── 7. Statistiche ──
     detect_arr = np.array([r["detect_ms"] for r in rows])
@@ -219,6 +316,8 @@ def run(args):
             "max_ms":    round(float(arr.max()), 2),
         }
 
+    cyc = [r["cycles"] for r in rows if "cycles" in r]
+    ins = [r["instructions"] for r in rows if "instructions" in r]
     result = {
         "profile": profile,
         "model_pack": pack,
@@ -234,8 +333,16 @@ def run(args):
         "detect": stats(detect_arr),
         "embed":  stats(embed_arr),
         "total":  stats(total_arr),
+        "cycles_per_inference": (int(np.median(cyc)) if cyc else None),
+        "instructions_per_inference": (int(np.median(ins)) if ins else None),
+        "perf_counters": "available" if cyc else "unavailable",
+        "telemetry_overhead_pct": overhead_pct,
         "per_frame": rows,
     }
+    if args.ort_profile:
+        print("ORT per-op profiling (sessioni raw det+rec, input sintetici)...")
+        result["ort_profile"] = _ort_op_profile(
+            pack, providers, insightface_home, Path(args.output).parent)
 
     # ── 8. Output ──
     out = Path(args.output)
@@ -254,12 +361,27 @@ def run(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Benchmark profili InsightFace — Jetson TX2")
-    p.add_argument("--profile", choices=["standard", "optimized-tx2"], required=True)
+    p.add_argument("--profile", choices=["standard", "optimized-tx2"])
     p.add_argument("--video", default=None, help="Path video mp4 (dentro il container)")
     p.add_argument("--n-frames", type=int, default=300)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--engine-cache", default="/data/engines",
                    help="Directory cache engine TensorRT")
-    p.add_argument("--output", required=True, help="Path JSON output")
+    p.add_argument("--output", help="Path JSON output")
+    p.add_argument("--ort-profile", action="store_true",
+                   help="Profiling per-operatore ONNX Runtime (sessioni raw det+rec)")
+    p.add_argument("--preflight", action="store_true",
+                   help="Verifica solo dipendenze/modelli ed esce")
     args = p.parse_args()
+    if args.preflight:
+        sys.exit(2 if preflight() else 0)
+    if not args.profile or not args.output:
+        p.error("--profile e --output sono obbligatori (oppure usa --preflight)")
+    probs = preflight(verbose=False)
+    hard = [x for x in probs if "modulo mancante" in x or "INSIGHTFACE_HOME" in x]
+    if hard:
+        print("[PREFLIGHT] Dipendenze mancanti — impossibile procedere:")
+        for x in hard:
+            print("  - " + x)
+        sys.exit(2)
     run(args)

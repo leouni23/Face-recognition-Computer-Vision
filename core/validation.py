@@ -54,90 +54,69 @@ def set_destination(path: Optional[str]) -> Path:
     return validation_root()
 
 
-# ── Validation groups (macro layer above sessions) ───────────────────────────────
-# A "validazione" is a named container folder under validation_root(); sessions nest inside it,
-# unchanged. The active group is a marker file under the root (survives restart). New sessions are
-# only allowed inside an active group; legacy flat sessions stay readable (backward-compat).
-_ACTIVE_MARKER = ".active_validation"
+# ── Daily validation folder + auto-generated session names ────────────────────────
+# Sessions nest automatically under validation/<YYYYMMDD>/ (created on first start of the day —
+# no manual "open/close validation" step). The session name is NEVER typed by the operator: it is
+# derived from the registry selection (subjects) + preset + profile, with a globally-unique provaN
+# counter, so name↔ground-truth can no longer diverge (the free-text-name lab incident).
 
 
-def _slugify(name: str) -> str:
+def _slugify(name: str, maxlen: int = 40) -> str:
     safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in (name or "").strip())
     safe = "-".join(p for p in safe.split("-") if p)  # collapse repeats
-    return safe[:40] or "validazione"
+    return safe[:maxlen] or "x"
 
 
-def active_group() -> Optional[str]:
-    """Folder name of the active validation group, or None. Read from the marker on disk."""
+def day_folder(now: Optional[datetime] = None) -> str:
+    return (now or datetime.now()).strftime("%Y%m%d")
+
+
+def make_trial_key(subject_labels: List[str], preset_id: Optional[str], profile: str) -> str:
+    """Stable identity of a trial combination: same subjects + preset + profile ⇒ same key."""
+    return "|".join(sorted(subject_labels)) + "|" + (preset_id or "none") + "|" + profile
+
+
+def count_trials(trial_key: str) -> int:
+    """How many existing sessions (whole validation/ tree, any layout) share `trial_key`.
+    Global counter per decision — provaN never repeats across days."""
+    root = validation_root()
+    n = 0
+    if not root.is_dir():
+        return 0
+    for d in root.iterdir():
+        candidates = [d] if (d / "session.json").is_file() else \
+                     ([s for s in d.iterdir() if (s / "session.json").is_file()] if d.is_dir() else [])
+        for s in candidates:
+            try:
+                meta = json.loads((s / "session.json").read_text(encoding="utf-8"))
+                if meta.get("trial_key") == trial_key:
+                    n += 1
+            except Exception:
+                pass
+    return n
+
+
+def _proc_io() -> dict:
+    """read_bytes/write_bytes from /proc/self/io (0s if unavailable, e.g. non-Linux)."""
+    out = {"read_bytes": 0, "write_bytes": 0}
     try:
-        marker = validation_root() / _ACTIVE_MARKER
-        if marker.is_file():
-            name = marker.read_text(encoding="utf-8").strip()
-            if name and (validation_root() / name).is_dir():
-                return name
+        for line in Path("/proc/self/io").read_text().splitlines():
+            k, _, v = line.partition(":")
+            if k in out:
+                out[k] = int(v.strip())
+    except Exception:
+        pass
+    return out
+
+
+def _vmrss_kb() -> Optional[int]:
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1])
     except Exception:
         pass
     return None
-
-
-def active_group_meta() -> Optional[dict]:
-    ag = active_group()
-    if ag is None:
-        return None
-    try:
-        meta = json.loads((validation_root() / ag / "validation.json").read_text(encoding="utf-8"))
-    except Exception:
-        meta = {"validation_id": ag, "name": ag}
-    meta["folder"] = ag
-    meta["session_count"] = _group_session_count(ag)
-    return meta
-
-
-def _group_session_count(folder: str) -> int:
-    d = validation_root() / folder
-    if not d.is_dir():
-        return 0
-    return sum(1 for s in d.iterdir() if (s / "session.json").is_file())
-
-
-def start_group(name: str, is_test: bool = False, notes: str = "") -> dict:
-    """Create a validation group folder + manifest and mark it active. Default name = timestamp."""
-    now = datetime.now()
-    name = (name or "").strip() or now.strftime("Validazione %Y-%m-%d %H:%M")
-    validation_id = now.strftime("val_%Y%m%d_%H%M%S")
-    folder = "{}__{}".format(validation_id, _slugify(name))
-    root = validation_root()
-    root.mkdir(parents=True, exist_ok=True)
-    gdir = root / folder
-    gdir.mkdir(parents=False, exist_ok=True)
-    meta = {
-        "validation_id": validation_id, "name": name, "created_at": now.isoformat(),
-        "closed_at": None, "notes": notes or "", "is_test": bool(is_test),
-    }
-    (gdir / "validation.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    (root / _ACTIVE_MARKER).write_text(folder, encoding="utf-8")
-    logger.success("[Validation] Gruppo avviato: {} ({})".format(name, folder))
-    return {**meta, "folder": folder, "session_count": 0}
-
-
-def close_group() -> dict:
-    """Write closed_at on the active group and clear the active marker."""
-    ag = active_group()
-    root = validation_root()
-    if ag is not None:
-        try:
-            mf = root / ag / "validation.json"
-            meta = json.loads(mf.read_text(encoding="utf-8"))
-            meta["closed_at"] = datetime.now().isoformat()
-            mf.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        except Exception:
-            logger.debug("close_group: manifest non aggiornato")
-    try:
-        (root / _ACTIVE_MARKER).unlink()
-    except OSError:
-        pass
-    logger.success("[Validation] Gruppo chiuso: {}".format(ag))
-    return {"closed": ag}
 
 
 def _configured_cameras() -> List[str]:
@@ -392,7 +371,9 @@ class ValidationManager:
     def start(self, name: str, enrolled: List[dict], threshold: float, *,
               session_type: str = "crossing", subjects: Optional[dict] = None,
               presets: Optional[List[dict]] = None, destination: Optional[str] = None,
-              record_video: Optional[bool] = None) -> dict:
+              record_video: Optional[bool] = None,
+              trial_subjects: Optional[List[dict]] = None,
+              preset_id: Optional[str] = None) -> dict:
         with self._lock:
             if self._active:
                 raise RuntimeError("Sessione di validazione già attiva")
@@ -401,14 +382,32 @@ class ValidationManager:
             self._record_video = (
                 _settings.validation_record_video if record_video is None else bool(record_video)
             )
-            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            if name:
-                safe = "".join(c for c in name if c.isalnum() or c in "-_")[:40]
-                if safe:
-                    session_id = f"{session_id}_{safe}"
-            # Tag the profile in the folder name so Standard / Optimized sessions are
-            # unambiguously separate on disk (e.g. …_standard / …_optTX2).
-            base = f"{session_id}_{profile_slug()}"
+            now = datetime.now()
+            trial_key = None
+            trial_n = None
+            if trial_subjects:
+                # AUTO-generated name (operator never types it): derived from the registry
+                # selection + preset + profile → name↔GT cannot diverge. provaN = global counter.
+                prof_name = profile_summary()["profile"]
+                labels = [s.get("label", "?") for s in trial_subjects]
+                trial_key = make_trial_key(labels, preset_id, prof_name)
+                trial_n = count_trials(trial_key) + 1
+                names_part = _slugify("-".join(
+                    (s.get("name") or s.get("label") or "?") for s in trial_subjects), maxlen=60)
+                preset_part = _slugify(preset_id or "nopreset", maxlen=20)
+                session_id = "{}_{}_{}_{}".format(
+                    now.strftime("%Y%m%d_%H%M%S"), names_part, preset_part, profile_slug())
+                base = "{}_prova{}".format(session_id, trial_n)
+            else:
+                # Legacy/CLI path (main.py --validation NAME): old naming preserved.
+                session_id = now.strftime("%Y%m%d_%H%M%S")
+                if name:
+                    safe = "".join(c for c in name if c.isalnum() or c in "-_")[:40]
+                    if safe:
+                        session_id = f"{session_id}_{safe}"
+                # Tag the profile in the folder name so Standard / Optimized sessions are
+                # unambiguously separate on disk (e.g. …_standard / …_optTX2).
+                base = f"{session_id}_{profile_slug()}"
 
             root = validation_root()
             # Robustness (Task E5): never silently fall back to internal storage. If an external
@@ -427,10 +426,9 @@ class ValidationManager:
             except OSError as exc:
                 raise RuntimeError(f"Impossibile usare la root di validazione {root}: {exc}")
 
-            # Nest the session inside the active validation group (mandatory via the API; the CLI
-            # --validation path may still run flat for backward-compat).
-            ag = active_group()
-            parent = (root / ag) if ag else root
+            # Nest the session inside the automatic DAILY folder validation/<YYYYMMDD>/ —
+            # created/reused on the first start of the day, no manual open/close step.
+            parent = root / day_folder(now)
             parent.mkdir(parents=True, exist_ok=True)
 
             # Never overwrite a session: create a NEW folder, appending _2/_3… on any collision.
@@ -449,6 +447,8 @@ class ValidationManager:
             if self._record_video:
                 (self._dir / "video").mkdir(exist_ok=True)  # footage kept in a subfolder (§6 layout)
             self._jsonl = (self._dir / "detections.jsonl").open("w", encoding="utf-8")
+            self._write_ms: List[float] = []   # JSONL append latencies (Tier-A disk telemetry)
+            self._io0 = _proc_io()             # /proc/self/io baseline → delta at stop
             self._sinks = {}
             self._frames = {}
             self._last_frame = {}
@@ -465,6 +465,11 @@ class ValidationManager:
                 "session_id": session_id,
                 "name": name,
                 "session_type": self._session_type,
+                # explicit operator-facing label (Singolo/Gruppo) + trial identity for provaN
+                "session_type_label": "Gruppo" if self._session_type == "common" else "Singolo",
+                "subjects_full": trial_subjects or [],
+                "trial_key": trial_key,
+                "trial_n": trial_n,
                 "record_video": self._record_video,
                 "ground_truth_source": gt_source,
                 # Active performance profile + its optimization parameters (Phase 1 vs Phase 2).
@@ -587,6 +592,22 @@ class ValidationManager:
             self._meta["end"] = datetime.now().isoformat()
             self._meta["cameras"] = sorted(self._frames.keys())
             self._meta["frames"] = {cam: idx + 1 for cam, idx in self._frames.items()}
+            # Tier-A session telemetry: disk I/O delta, RSS, JSONL append latency (mean/p95).
+            io1 = _proc_io()
+            io0 = getattr(self, "_io0", None) or {"read_bytes": 0, "write_bytes": 0}
+            self._meta["io"] = {"read_bytes": io1["read_bytes"] - io0["read_bytes"],
+                                "write_bytes": io1["write_bytes"] - io0["write_bytes"]}
+            self._meta["mem_vmrss_kb"] = _vmrss_kb()
+            w = sorted(getattr(self, "_write_ms", []) or [])
+            if w:
+                self._meta["jsonl_write_ms"] = {
+                    "n": len(w), "mean": round(sum(w) / len(w), 3),
+                    "p95": round(w[min(len(w) - 1, int(0.95 * len(w)))], 3)}
+            try:
+                from core.perfcounters import perf_counters
+                self._meta["perf_counters"] = "available" if perf_counters.available else "unavailable"
+            except Exception:
+                self._meta["perf_counters"] = "unavailable"
             self._write_manifest()
             sid = self._session_id
             self._active = False
@@ -665,11 +686,14 @@ class ValidationManager:
         return out
 
     # ── per-frame recording ───────────────────────────────────────────────────
-    def record(self, camera_id: str, frame, results, details: List[dict]) -> None:
+    def record(self, camera_id: str, frame, results, details: List[dict],
+               stages: Optional[dict] = None) -> None:
         """Write the per-detection JSONL for one frame (and, when video is on, an annotated
         video frame). `results` is the pipeline's [(location, pid, name, conf), ...]; `details`
-        the aligned per-face dicts. Called for every processed frame while active — including
-        zero-detection frames. With video off, no image bytes are ever written to disk.
+        the aligned per-face dicts; `stages` the Tier-A per-frame telemetry (per-stage ms,
+        cycles/instructions, n_faces, det input resolution) merged into each record. Called for
+        every processed frame while active — including zero-detection frames. With video off,
+        no image bytes are ever written to disk.
         """
         if not self._active:
             return
@@ -724,7 +748,11 @@ class ValidationManager:
                     for field in ("subject_label", "true_person_id", "non_mate"):
                         if self._run.get(field) is not None:
                             rec[field] = self._run[field]
+                if stages:
+                    rec.update(stages)   # Tier-A telemetry: t_ms{}, cycles, instructions, …
+                t_w = time.perf_counter()
                 self._jsonl.write(json.dumps(rec) + "\n")
+                self._write_ms.append((time.perf_counter() - t_w) * 1000.0)
                 faces_live.append({"face_id": face_id, "bbox": d["bbox"],
                                    "predicted_identity": d["predicted_identity"]})
             self._jsonl.flush()

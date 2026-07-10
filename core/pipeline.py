@@ -10,6 +10,7 @@ from loguru import logger
 from config.settings import get_settings
 from core.detector import FaceLocation, detect_and_encode, detect_faces, embed_faces
 from core.geometry import project_point, project_polar
+from core.perfcounters import perf_counters
 from core.profile import get_profile
 from core.metrics import PerfTracker
 from core.notifier import get_notifier
@@ -246,6 +247,7 @@ class FaceIdPipeline:
                 frame, camera_id, prof, instrument, recording, notify_unknown, t_start, timing)
 
         # ── Standard profile — unchanged behaviour ────────────────────────────────
+        cyc0 = perf_counters.snap() if recording else None
         face_data = detect_and_encode(frame, timing=timing)
         if not face_data:
             if notify_unknown:  # no faces → unknown streak resets
@@ -266,7 +268,10 @@ class FaceIdPipeline:
         if notify_unknown:
             self._update_unknown_alert(camera_id, unknown_embeddings)
         if recording:
-            validation_manager.record(camera_id, frame, results, details)
+            validation_manager.record(
+                camera_id, frame, results, details,
+                stages=self._stage_telemetry(timing, 0.0, match_ms, t_start, cyc0,
+                                             frame.shape, len(face_data)))
         if instrument:
             self.perf.record(
                 camera_id, detect_ms=timing.get("detect_ms", 0.0),
@@ -275,6 +280,30 @@ class FaceIdPipeline:
             )
 
         return results
+
+    @staticmethod
+    def _stage_telemetry(timing, pre_ms, match_ms, t_start, cyc0, det_shape, n_faces):
+        """Tier-A per-frame telemetry attached to every detections.jsonl record: per-stage wall
+        times, CPU cycles/instructions over detect+embed+match (perf_event), detector input
+        resolution and face count — keyed per model/precision via the session manifest."""
+        t = timing or {}
+        out = {
+            "t_ms": {
+                "pre": round(pre_ms, 3),
+                "det": round(t.get("detect_ms", 0.0), 3),
+                "emb": round(t.get("embed_ms", 0.0), 3),
+                "match": round(match_ms, 3),
+                "total": round((time.perf_counter() - t_start) * 1000.0, 3),
+            },
+            "n_faces": n_faces,
+            "det_input_wh": [int(det_shape[1]), int(det_shape[0])],
+        }
+        if cyc0 is not None:
+            cyc1 = perf_counters.snap()
+            if cyc1 is not None:
+                out["cycles"] = cyc1[0] - cyc0[0]
+                out["instructions"] = cyc1[1] - cyc0[1]
+        return out
 
     def _process_optimized(self, frame, camera_id, prof, instrument, recording,
                            notify_unknown, t_start, timing):
@@ -291,7 +320,10 @@ class FaceIdPipeline:
                                  total_ms=(time.perf_counter() - t_start) * 1000.0, faces=len(cached))
             return cached
 
+        cyc0 = perf_counters.snap() if recording else None
+        t_pre = time.perf_counter()
         work, scale = self._downsample(frame, prof.det_size)
+        pre_ms = (time.perf_counter() - t_pre) * 1000.0
         pairs = detect_faces(work, timing=timing)  # [(loc_ds, face)]
         if not pairs:
             self._last_results[camera_id] = []
@@ -339,7 +371,10 @@ class FaceIdPipeline:
         if notify_unknown:
             self._update_unknown_alert(camera_id, unknown_embeddings)
         if recording:
-            validation_manager.record(camera_id, frame, results, details)
+            validation_manager.record(
+                camera_id, frame, results, details,
+                stages=self._stage_telemetry(timing, pre_ms, match_ms, t_start, cyc0,
+                                             work.shape, len(face_data)))
         if instrument:
             self.perf.record(
                 camera_id, detect_ms=(timing or {}).get("detect_ms", 0.0),

@@ -17,12 +17,12 @@ from loguru import logger
 from config.settings import get_settings
 from core.camera import probe_source
 from core.camera_manager import camera_manager
-from core.detector import detect_and_encode, get_warmup_state, reset_for_profile_change
+from core.detector import (
+    detect_and_encode, get_loaded_info, get_warmup_state, reset_for_profile_change,
+)
 from core.profile import OPTIMIZED, STANDARD, get_profile, profile_summary
 from core.geometry import compute_homography, solve_polar_calibration
-from core.validation import (
-    active_group, active_group_meta, close_group, start_group, validation_manager, validation_root,
-)
+from core.validation import validation_manager, validation_root
 from core.validation_metrics import compute_and_export
 from core.validation_presets import (
     delete_preset, duplicate_preset, load_presets, load_subjects, save_subjects, upsert_preset,
@@ -430,14 +430,35 @@ def validation_page():
     return send_from_directory(STATIC_DIR, "validation.html")
 
 
+def _resolve_trial_subjects(subjects):
+    """Attach full person names to the wizard's registry selection [{label, person_id}] so the
+    manifest and the auto-generated session name carry real names, never bare S1/S2."""
+    if not subjects:
+        return None
+    ids = [s.get("person_id") for s in subjects if s.get("person_id") is not None]
+    names = {}
+    if ids:
+        with get_session() as session:
+            for p in session.query(Person).filter(Person.id.in_(ids)).all():
+                names[p.id] = p.name
+    out = []
+    for s in subjects:
+        pid = s.get("person_id")
+        out.append({
+            "label": (s.get("label") or "").strip() or "?",
+            "person_id": pid,
+            "name": names.get(pid) or s.get("name") or ("Sconosciuto" if pid is None else "?"),
+        })
+    return out
+
+
 @app.route("/api/validation/start", methods=["POST"])
 def validation_start():
-    if active_group() is None:
-        return jsonify({"error": "Avvia prima una validazione"}), 409
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     if name and not _NAME_RE.match(name):
         return jsonify({"error": "Nome sessione non valido"}), 400
+    trial_subjects = _resolve_trial_subjects(data.get("subjects"))
     with get_session() as session:
         enrolled = [
             {"id": p.id, "name": p.name}
@@ -453,10 +474,33 @@ def validation_start():
             session_type=data.get("session_type", "crossing"),
             destination=(data.get("destination") or None),
             record_video=(None if record_video is None else bool(record_video)),
+            trial_subjects=trial_subjects,
+            preset_id=(data.get("preset_id") or None),
         )
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 409
     return jsonify({**info, "enrolled": enrolled, "threshold": _settings.match_threshold})
+
+
+@app.route("/api/validation/preview_name", methods=["POST"])
+def validation_preview_name():
+    """Preview of the auto-generated session name (Step 5 summary) without creating anything."""
+    from core.profile import profile_summary as _ps
+    from core.validation import count_trials, make_trial_key, _slugify
+    data = request.get_json(silent=True) or {}
+    trial_subjects = _resolve_trial_subjects(data.get("subjects")) or []
+    preset_id = data.get("preset_id") or None
+    prof = _ps()["profile"]
+    labels = [s["label"] for s in trial_subjects]
+    key = make_trial_key(labels, preset_id, prof)
+    n = count_trials(key) + 1
+    names_part = _slugify("-".join(s["name"] for s in trial_subjects), maxlen=60) if trial_subjects else "x"
+    from core.profile import profile_slug
+    name = "{}_{}_{}_{}_prova{}".format(
+        datetime.now().strftime("%Y%m%d_%H%M%S"), names_part,
+        _slugify(preset_id or "nopreset", maxlen=20), profile_slug(), n)
+    return jsonify({"name": name, "trial_n": n, "trial_key": key,
+                    "day_folder": datetime.now().strftime("%Y%m%d")})
 
 
 @app.route("/api/validation/run", methods=["POST"])
@@ -529,37 +573,20 @@ def validation_sessions():
     return jsonify(_read_session_manifests())
 
 
-@app.route("/api/validation/group/active")
-def validation_group_active():
-    return jsonify({"active": active_group_meta()})
-
-
-@app.route("/api/validation/group/start", methods=["POST"])
-def validation_group_start():
-    data = request.get_json(silent=True) or {}
-    return jsonify(start_group(name=data.get("name", ""), is_test=bool(data.get("is_test")),
-                               notes=data.get("notes", "")))
-
-
-@app.route("/api/validation/group/close", methods=["POST"])
-def validation_group_close():
-    if validation_manager.is_active():
-        return jsonify({"error": "Ferma prima la sessione in corso"}), 409
-    return jsonify(close_group())
-
-
 @app.route("/api/validation/groups")
 def validation_groups():
-    """Validazioni (macro-group) each with their sessions; legacy flat sessions under a synthetic
-    "(senza validazione)" group. Built from the recursive scan (backward-compatible)."""
+    """Archivio: sessions grouped by DAILY folder (auto layout validation/<YYYYMMDD>/), plus
+    legacy manual groups (val_*) and flat sessions under "(senza validazione)". Read-only."""
     from core.compare import scan_sessions
     groups = {}
     order = []
+    today = datetime.now().strftime("%Y%m%d")
     for s in scan_sessions():
         key = s.get("group") or "__flat__"
         if key not in groups:
+            gname = s.get("group_name") or "(senza validazione)"
             groups[key] = {
-                "folder": s.get("group"), "name": s.get("group_name") or "(senza validazione)",
+                "folder": s.get("group"), "name": gname,
                 "is_test": s.get("is_test", False), "sessions": [], "profiles": set(),
             }
             order.append(key)
@@ -567,39 +594,16 @@ def validation_groups():
         g["sessions"].append(s)
         if s.get("profile"):
             g["profiles"].add(s["profile"])
-    active = active_group()
     out = []
-    for key in order:
+    for key in sorted(order, key=lambda k: (groups[k]["folder"] or ""), reverse=True):
         g = groups[key]
         out.append({
             "folder": g["folder"], "name": g["name"], "is_test": g["is_test"],
-            "active": g["folder"] == active, "n_sessions": len(g["sessions"]),
-            "profiles": sorted(g["profiles"]), "sessions": g["sessions"],
+            "active": g["folder"] == today,  # the current day's folder
+            "n_sessions": len(g["sessions"]), "profiles": sorted(g["profiles"]),
+            "sessions": g["sessions"],
         })
     return jsonify(out)
-
-
-@app.route("/api/validation/group/<vid>", methods=["DELETE"])
-def validation_group_delete(vid: str):
-    """Delete a TEST validation group + its sessions (confirm in UI). Non-test → 403."""
-    import shutil
-    if "/" in vid or "\\" in vid or vid in ("", ".", ".."):
-        return jsonify({"error": "id non valido"}), 400
-    root = validation_root().resolve()
-    gdir = (root / vid).resolve()
-    if not (gdir.is_dir() and root in gdir.parents and (gdir / "validation.json").is_file()):
-        return jsonify({"error": "Validazione non trovata"}), 404
-    try:
-        meta = json.loads((gdir / "validation.json").read_text(encoding="utf-8"))
-    except Exception:
-        meta = {}
-    if not meta.get("is_test"):
-        return jsonify({"error": "Solo le validazioni di prova (test) sono eliminabili"}), 403
-    if active_group() == vid:
-        close_group()
-    shutil.rmtree(gdir, ignore_errors=True)
-    logger.info(f"[Validation] Gruppo di prova eliminato: {vid}")
-    return jsonify({"deleted": vid})
 
 
 @app.route("/api/validation/compare")
@@ -807,6 +811,27 @@ def settings_profile():
 def warmup_status():
     """Model warm-up progress for the UI bar: {active, phase, pct, eta_s, ready}."""
     return jsonify(get_warmup_state())
+
+
+@app.route("/api/settings/profile/status")
+def profile_status():
+    """Semaforo: requested profile vs what the analyzer ACTUALLY loaded (pack/precision/providers
+    read from the live build, not from settings). match=True only when loaded == requested and
+    warm-up is done — a silent misconfig (e.g. OPT_MODEL_PACK pointing both profiles at buffalo_l)
+    shows up as an explicit mismatch instead of passing unnoticed."""
+    requested = profile_summary()
+    loaded = get_loaded_info()
+    warmup = get_warmup_state()
+    match = bool(
+        warmup.get("ready")
+        and loaded.get("model_pack") == requested.get("model_pack")
+        and loaded.get("precision") == requested.get("precision")
+        and loaded.get("profile") == requested.get("profile")
+    )
+    state = "switching" if (warmup.get("active") or not warmup.get("ready")) else \
+            ("ok" if match else "mismatch")
+    return jsonify({"state": state, "match": match, "requested": requested,
+                    "loaded": loaded, "warmup": warmup})
 
 
 _CONTAINER = os.environ.get("FACEID_CONTAINER", "faceid")

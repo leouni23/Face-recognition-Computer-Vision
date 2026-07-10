@@ -73,15 +73,20 @@ def scan_sessions(root: Optional[Path] = None) -> List[dict]:
     for d in sorted(root.iterdir()):
         if (d / "session.json").is_file():
             _emit(d, None)                         # legacy flat session
-        elif d.is_dir():                           # validation group → recurse one level
-            group = None
+        elif d.is_dir():                           # container dir → recurse one level
             vf = d / "validation.json"
-            if vf.is_file():
+            if vf.is_file():                       # legacy manual group (val_*)
                 try:
                     g = json.loads(vf.read_text(encoding="utf-8"))
                     group = {"folder": d.name, "name": g.get("name", d.name), "is_test": g.get("is_test")}
                 except Exception:
                     group = {"folder": d.name, "name": d.name, "is_test": False}
+            elif len(d.name) == 8 and d.name.isdigit():   # daily folder validation/<YYYYMMDD>/
+                group = {"folder": d.name,
+                         "name": "Validazione {}-{}-{}".format(d.name[:4], d.name[4:6], d.name[6:]),
+                         "is_test": False}
+            else:                                  # unknown container: still browsable
+                group = {"folder": d.name, "name": d.name, "is_test": False}
             for sub in sorted(d.iterdir()):
                 _emit(sub, group)
     return out

@@ -26,6 +26,12 @@ def _extract(line: str):
     if m:
         row["gr3d_pct"] = int(m.group(1))
 
+    # EMC_FREQ (memory-controller utilization %) — CRITICO su TX2: CPU e GPU condividono la
+    # banda LPDDR4; EMC saturo con GPU scarica = collo di bottiglia di MEMORIA, non di calcolo.
+    m = re.search(r"EMC_FREQ\s+(\d+)%", line)
+    if m:
+        row["emc_pct"] = int(m.group(1))
+
     # CPU [12%@2035,14%@2035,...] — media delle core
     m = re.search(r"CPU\s+\[([^\]]+)\]", line)
     if m:
@@ -85,6 +91,7 @@ def parse_file(path: str) -> dict:
         return round(max(vals), 1) if vals else None
 
     gr3d = col("gr3d_pct")
+    emc  = col("emc_pct")
     cpu  = col("cpu_pct_mean")
     vdd  = col("vdd_in_mw")
     pom  = col("pom_5v_mw")
@@ -96,6 +103,8 @@ def parse_file(path: str) -> dict:
         "n_samples": len(rows),
         "gpu_gr3d_pct_mean": avg(gr3d),
         "gpu_gr3d_pct_peak": peak(gr3d),
+        "emc_pct_mean": avg(emc),
+        "emc_pct_peak": peak(emc),
         "cpu_pct_mean": avg(cpu),
         "cpu_pct_peak": peak(cpu),
         "ram_used_mb_peak": peak(ram),

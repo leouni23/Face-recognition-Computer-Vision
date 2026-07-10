@@ -597,6 +597,43 @@ Cambiare profilo ricostruisce l'analyzer InsightFace (nuovo pack/provider) **in 
 
 > Deploy completo sul TX2 (immagine singola, disco esterno, profili): vedi il README §«Jetson TX2».
 
+### 11.5 Wizard sessione, semaforo profilo e telemetria per-inferenza
+
+**Semaforo profilo** (dashboard, config bar): pallino accanto ai bottoni Standard/Optimized-TX2 —
+🔴 caricamento/switch in corso, 🟢 **verificato** (il pack/precisione REALMENTE caricati dal
+build dell'analyzer coincidono col profilo richiesto; `GET /api/settings/profile/status`),
+🟠 **mismatch** con la discrepanza mostrata (es. `.env` che punta entrambi i profili a buffalo_l —
+incidente di laboratorio ora impossibile da non vedere). All'avvio `main.py` logga i valori
+effettivi di `PERFORMANCE_PROFILE` e di tutti gli `OPT_*`.
+
+**Wizard `/validation` (5 passi, sequenziale, back sempre attivo):** 1) preset a sinistra +
+**destinazione disco obbligatoria** a destra (ultima scelta ricordata); 2) tipo **Singolo**
+(attraversamenti, anche più utenti) / **Gruppo** + modalità mappatura/video; 3) **partecipanti dal
+registro con nomi completi** ("S1 — Mario Rossi"), multi-selezione con spunte stabili +
+"Sconosciuto"; 4) preset della sessione (default = ultimo usato); 5) riepilogo con **nome
+auto-generato** `YYYYMMDD_HHMMSS_<Nomi>_<preset>_<profilo>_provaN` (N = contatore **globale** per
+combinazione soggetti+preset+profilo, `trial_key`/`trial_n` in session.json) — l'operatore non
+digita mai il nome → nome↔ground-truth non possono più divergere. Le sessioni finiscono
+**automaticamente** nella cartella del giorno `validation/<YYYYMMDD>/` (niente più apri/chiudi
+validazione); l'**Archivio** raggruppa per giorno (compat: layout flat e gruppi `val_*` legacy).
+
+**Telemetria Tier A** (sempre attiva, overhead ~trascurabile, misurato dal benchmark): ogni record
+di `detections.jsonl` porta `t_ms{pre,det,emb,match,total}`, `cycles`/`instructions` per
+identificazione (perf_event via ctypes, `core/perfcounters.py`; se il kernel li nega —
+`perf_event_paranoid`>2 nel container — servono `--cap-add PERFMON` o sysctl host, e il manifest
+segna `perf_counters: unavailable`), `n_faces`, `det_input_wh`. A fine sessione `session.json`
+aggiunge delta I/O disco (`/proc/self/io`), `mem_vmrss_kb` e latenza media/p95 delle append JSONL.
+
+**Telemetria Tier B** (solo benchmark dedicati, MAI durante i test di accuratezza):
+`scripts/benchmark_profili.py` (dentro il container) con `--preflight` (verifica dipendenze ARM
+senza crash a metà run), stats mean/mediana/p95 per stadio, cicli/istruzioni mediani,
+`--ort-profile` (profiler ONNX Runtime per-operatore su sessioni raw det+rec) e
+`telemetry_overhead_pct`; `scripts/run_benchmark.sh` (host) cattura tegrastats a 5 Hz con **EMC%**
+(memory controller — su TX2 CPU+GPU condividono la banda LPDDR4: EMC saturo a GPU scarica = collo
+di bottiglia di memoria); `scripts/generate_report.py` produce `performance_report.md` con la
+sezione intrusività. Opzionale host-side: `trtexec --loadEngine=... --dumpProfile` per i per-layer
+TensorRT.
+
 ---
 
 ## 12. Bot Telegram

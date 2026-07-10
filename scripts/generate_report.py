@@ -34,6 +34,7 @@ def _perf_row(perf, tegra):
         or next((p for p in providers_active), "N/A")
     )
 
+    cyc = perf.get("cycles_per_inference")
     return [
         perf.get("profile", "N/A"),
         perf.get("model_pack", "N/A"),
@@ -41,8 +42,9 @@ def _perf_row(perf, tegra):
         _fmt(perf.get("total", {}).get("median_ms"), " ms"),
         _fmt(perf.get("total", {}).get("p95_ms"), " ms"),
         _fmt(perf.get("fps_sustained"), " FPS"),
+        ("{:.1f} M".format(cyc / 1e6) if cyc else "N/A"),
         _fmt(tegra.get("gpu_gr3d_pct_mean"), "%"),
-        _fmt(tegra.get("gpu_gr3d_pct_peak"), "%"),
+        _fmt(tegra.get("emc_pct_mean"), "%"),
         _fmt(tegra.get("cpu_pct_mean"), "%"),
         _fmt(tegra.get("power_mw_mean"), " mW"),
         _fmt(tegra.get("temp_gpu_c_peak") or tegra.get("temp_cpu_c_peak"), "°C"),
@@ -75,7 +77,7 @@ def generate(args):
     headers = [
         "Profilo", "Model pack", "Provider attivo",
         "Lat. mediana", "Lat. p95", "FPS",
-        "GPU% medio", "GPU% picco", "CPU% medio",
+        "Cicli/inf", "GPU% medio", "EMC% medio", "CPU% medio",
         "Potenza media", "Temp picco",
     ]
 
@@ -98,8 +100,22 @@ _Modalità potenza: MAXN (nvpmodel -m 0 + jetson_clocks)_
 {_table(rows, headers)}
 
 > **Nota colonne**: Latenza = detection + embedding per frame (un volto). FPS sostenuti =
-> n_frame / wall_time totale misura (escluso warm-up). Potenza = VDD_IN (intera scheda).
+> n_frame / wall_time totale misura (escluso warm-up). Cicli/inf = mediana dei cicli CPU per
+> identificazione (perf_event; N/A se il kernel li nega → `--cap-add PERFMON`). EMC% = utilizzo
+> del memory controller: su TX2 CPU e GPU condividono la banda LPDDR4 — **EMC saturo con GPU
+> scarica = collo di bottiglia di memoria**, non di calcolo. Potenza = VDD_IN (intera scheda).
 > Temperatura = picco GPU (o CPU se GPU non disponibile dal sensore).
+
+### Intrusività della telemetria (Tier A vs Tier B)
+
+- **Tier A (sempre attivo nelle sessioni)**: timing per stadio (`time.perf_counter`), lettura
+  contatori perf (2 `read()` da 8 byte per frame), delta `/proc/self/io` e VmRSS a fine sessione.
+  Overhead misurato dal benchmark: campo `telemetry_overhead_pct` in `perf_<profilo>.json`
+  (tipicamente <1–2 %).
+- **Tier B (SOLO benchmark dedicati, mai durante i test di accuratezza)**: profiler ONNX Runtime
+  per-operatore (`--ort-profile`, sessioni raw con input sintetici) e, opzionale sull'host,
+  `trtexec --loadEngine=/mnt/faceid-data/engines/... --dumpProfile` per i tempi per-layer degli
+  engine TensorRT. Strumenti classe Nsight possono dimezzare il throughput: mai in sessione.
 
 ---
 

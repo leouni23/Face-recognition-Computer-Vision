@@ -83,6 +83,15 @@ def main() -> None:
     if deleted:
         logger.info(f"Retention GDPR: {deleted} persona/e eliminate per scadenza dati")
 
+    # Log the EFFECTIVE profile knobs at boot so a misconfig (e.g. OPT_MODEL_PACK=buffalo_l on
+    # both profiles) is visible in the container logs, not only in the dashboard semaforo.
+    logger.info(
+        "Config profilo: PERFORMANCE_PROFILE={} | OPT_MODEL_PACK={} OPT_PRECISION={} "
+        "OPT_DET={}x{} OPT_FRAME_SKIP={} OPT_TRACKER={} OPT_BATCH_EMBED={}".format(
+            _settings.performance_profile, _settings.opt_model_pack, _settings.opt_precision,
+            _settings.opt_det_width, _settings.opt_det_height, _settings.opt_frame_skip,
+            _settings.opt_tracker, _settings.opt_batch_embed))
+
     pipeline = FaceIdPipeline()
     broadcaster.pipeline = pipeline
 
