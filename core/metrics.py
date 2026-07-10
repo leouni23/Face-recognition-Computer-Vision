@@ -315,9 +315,30 @@ def detect_platform_label() -> str:
     # "arm64-cpu" in every session manifest.
     jm = _jetson_model()
     if jm:
-        return jm
-    metrics = get_resource_metrics()
-    backend = metrics.get("backend")
-    if backend == _NvmlProvider.backend and metrics.get("gpu_name"):
-        return f"{_arch()}-{_slug_gpu(metrics['gpu_name'])}"
-    return f"{_arch()}-cpu"
+        base = jm
+    else:
+        metrics = get_resource_metrics()
+        backend = metrics.get("backend")
+        if backend == _NvmlProvider.backend and metrics.get("gpu_name"):
+            base = f"{_arch()}-{_slug_gpu(metrics['gpu_name'])}"
+        else:
+            base = _arch()
+    return base + _compute_suffix()
+
+
+def _compute_suffix() -> str:
+    """Compute suffix from the providers ACTUALLY bound by the live InsightFace session (same
+    source as the profile semaforo) — never a static fallback: -trt (TensorRT), -gpu (CUDA),
+    -cpu (analyzer loaded on CPU), '' (analyzer not built yet → unknown, no claim)."""
+    try:
+        from core.detector import get_loaded_info
+        provs = (get_loaded_info() or {}).get("providers") or []
+    except Exception:
+        provs = []
+    if not provs:
+        return ""
+    if any("Tensorrt" in p or "TensorRT" in p for p in provs):
+        return "-trt"
+    if any("CUDA" in p for p in provs):
+        return "-gpu"
+    return "-cpu"

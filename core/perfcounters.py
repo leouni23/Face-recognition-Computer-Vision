@@ -13,6 +13,7 @@ import os
 import platform
 import struct
 import threading
+from pathlib import Path
 
 from loguru import logger
 
@@ -40,6 +41,21 @@ def _open_counter(config):
     libc = ctypes.CDLL(None, use_errno=True)
     fd = libc.syscall(nr, buf, 0, -1, -1, 0)
     return fd if fd >= 0 else None
+
+
+def _diagnose_perf_failure() -> str:
+    """Distinguish WHY perf_event_open failed so the operator applies the right fix:
+    paranoid sysctl (host) vs seccomp (Docker default profile) vs missing capability."""
+    try:
+        paranoid = int(Path("/proc/sys/kernel/perf_event_paranoid").read_text().strip())
+    except Exception:
+        paranoid = None
+    if paranoid is not None and paranoid > 2:
+        return ("kernel.perf_event_paranoid={} sull'HOST: abbassa con "
+                "'sudo sysctl kernel.perf_event_paranoid=1'".format(paranoid))
+    return ("syscall probabilmente bloccata dal profilo seccomp di Docker "
+            "(paranoid={} ok): avvia il container con security_opt "
+            "seccomp:./docker/seccomp-perf.json (gia' in docker-compose.jetson.yml)".format(paranoid))
 
 
 class PerfCounters:
@@ -70,9 +86,7 @@ class PerfCounters:
                 fds = ()
                 if not self._warned:
                     self._warned = True
-                    logger.info("perf_event non disponibile (paranoid/capability): telemetria "
-                                "cicli/istruzioni disattivata. Abilita con --cap-add PERFMON o "
-                                "kernel.perf_event_paranoid<=2 sull'host.")
+                    logger.info("perf_event non disponibile: " + _diagnose_perf_failure())
             else:
                 fds = (c, i)
             self._local.fds = fds

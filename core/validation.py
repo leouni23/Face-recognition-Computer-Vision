@@ -590,6 +590,12 @@ class ValidationManager:
                     json.dumps(segments, indent=2), encoding="utf-8")
             # Cameras/frames come from the global counter (works with or without video).
             self._meta["end"] = datetime.now().isoformat()
+            # Refresh the platform label: at stop the analyzer is loaded, so the compute suffix
+            # (-trt/-gpu/-cpu) reflects the REAL session even if start happened during warm-up.
+            try:
+                self._meta["platform"] = detect_platform_label()
+            except Exception:
+                pass
             self._meta["cameras"] = sorted(self._frames.keys())
             self._meta["frames"] = {cam: idx + 1 for cam, idx in self._frames.items()}
             # Tier-A session telemetry: disk I/O delta, RSS, JSONL append latency (mean/p95).
