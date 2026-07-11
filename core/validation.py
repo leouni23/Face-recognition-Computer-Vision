@@ -109,6 +109,38 @@ def _proc_io() -> dict:
     return out
 
 
+def _flatten_numeric(d: dict, prefix: str = "") -> Dict[str, float]:
+    """Flatten a hw snapshot to dotted numeric keys (power_mw.VDD_IN, temp_c.CPU-therm, …),
+    skipping bools (throttling handled separately) so only real measurements aggregate."""
+    out: Dict[str, float] = {}
+    for k, v in d.items():
+        key = prefix + k
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, dict):
+            out.update(_flatten_numeric(v, key + "."))
+        elif isinstance(v, (int, float)):
+            out[key] = float(v)
+    return out
+
+
+def _device_for_path(path: str) -> Optional[str]:
+    """Block device backing a path (longest mountpoint prefix in /proc/mounts) — records which
+    physical disk (SD/USB/eMMC) the session was written to. Best-effort, Linux only."""
+    try:
+        best_mp, best_dev = "", None
+        for line in Path("/proc/mounts").read_text().splitlines():
+            parts = line.split()
+            if len(parts) < 2 or not parts[0].startswith("/dev/"):
+                continue
+            mp = parts[1].replace("\\040", " ")
+            if (path == mp or path.startswith(mp.rstrip("/") + "/")) and len(mp) > len(best_mp):
+                best_mp, best_dev = mp, parts[0]
+        return best_dev
+    except Exception:
+        return None
+
+
 def _vmrss_kb() -> Optional[int]:
     try:
         for line in Path("/proc/self/status").read_text().splitlines():
@@ -449,6 +481,8 @@ class ValidationManager:
             self._jsonl = (self._dir / "detections.jsonl").open("w", encoding="utf-8")
             self._write_ms: List[float] = []   # JSONL append latencies (Tier-A disk telemetry)
             self._io0 = _proc_io()             # /proc/self/io baseline → delta at stop
+            self._hw_samples: List[dict] = []  # per-embedding sysfs hw snapshots (aggregated at stop)
+            self._energy: List[float] = []     # per-record VDD_IN·emb_ms (µJ) for energy/identification
             self._sinks = {}
             self._frames = {}
             self._last_frame = {}
@@ -614,6 +648,13 @@ class ValidationManager:
                 self._meta["perf_counters"] = "available" if perf_counters.available else "unavailable"
             except Exception:
                 self._meta["perf_counters"] = "unavailable"
+            # Hardware telemetry aggregates (sysfs, in-process): per-channel mean/median/p95/peak,
+            # energy per identification (∫VDD_IN over embed time), sampling overhead, throttling.
+            self._finalize_hw_telemetry()
+            if not self._meta.get("destination_device"):
+                dev = _device_for_path(str(self._dir))
+                if dev:
+                    self._meta["destination_device"] = dev
             self._write_manifest()
             sid = self._session_id
             self._active = False
@@ -692,6 +733,47 @@ class ValidationManager:
         return out
 
     # ── per-frame recording ───────────────────────────────────────────────────
+    def _finalize_hw_telemetry(self) -> None:
+        """Aggregate the accumulated per-frame sysfs snapshots into the session manifest:
+        hw_aggregate (mean/median/p95/peak per numeric channel), energy_per_id (µJ), the measured
+        sampling cost, and the throttling fraction. No-op if no hw samples were captured."""
+        samples = getattr(self, "_hw_samples", None) or []
+        if samples:
+            # Flatten each snapshot to dotted numeric keys, then aggregate per key.
+            series: Dict[str, List[float]] = {}
+            throttled = 0
+            for s in samples:
+                if s.get("throttling"):
+                    throttled += 1
+                for k, v in _flatten_numeric(s).items():
+                    series.setdefault(k, []).append(v)
+            agg = {}
+            for k, vals in series.items():
+                vs = sorted(vals)
+                n = len(vs)
+                agg[k] = {
+                    "mean": round(sum(vs) / n, 2),
+                    "median": round(vs[n // 2], 2),
+                    "p95": round(vs[min(n - 1, int(0.95 * n))], 2),
+                    "peak": round(vs[-1], 2),
+                }
+            self._meta["hw_aggregate"] = agg
+            self._meta["throttling_frac"] = round(throttled / len(samples), 3)
+        energy = getattr(self, "_energy", None) or []
+        if energy:
+            self._meta["energy_per_id"] = {
+                "n": len(energy),
+                "total_uj": round(sum(energy), 1),
+                "mean_uj": round(sum(energy) / len(energy), 1),
+            }
+        try:
+            from core.jetson_sysfs import sysfs_telemetry
+            cost = sysfs_telemetry.probe_cost_us()
+            if cost is not None:
+                self._meta["telemetry_sampling_cost_us"] = cost
+        except Exception:
+            pass
+
     def record(self, camera_id: str, frame, results, details: List[dict],
                stages: Optional[dict] = None) -> None:
         """Write the per-detection JSONL for one frame (and, when video is on, an annotated
@@ -762,6 +844,15 @@ class ValidationManager:
                 faces_live.append({"face_id": face_id, "bbox": d["bbox"],
                                    "predicted_identity": d["predicted_identity"]})
             self._jsonl.flush()
+            # Per-FRAME hw accumulation (one snapshot/frame, not per face) for the session
+            # aggregates and the energy-per-identification estimate. mW·ms = µJ exactly.
+            if stages and isinstance(stages.get("hw"), dict):
+                hw = stages["hw"]
+                self._hw_samples.append(hw)
+                vdd = (hw.get("power_mw") or {}).get("VDD_IN")
+                emb_ms = (stages.get("t_ms") or {}).get("emb")
+                if vdd is not None and emb_ms:
+                    self._energy.append(float(vdd) * float(emb_ms))
             # Latest boxes for live click-to-assign — metadata only, never an image on disk.
             self._last_frame[camera_id] = {
                 "frame_index": frame_index, "ts_ms": ts_ms, "faces": faces_live,

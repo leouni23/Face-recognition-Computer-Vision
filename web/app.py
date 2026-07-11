@@ -393,7 +393,12 @@ def api_metrics():
     perf = {"cameras": {}, "aggregate_fps": 0.0}
     if broadcaster.pipeline is not None:
         perf = broadcaster.pipeline.perf.snapshot()
-    return jsonify({"perf": perf, "resources": get_resource_metrics()})
+    out = {"perf": perf, "resources": get_resource_metrics()}
+    from core.jetson_sysfs import sysfs_telemetry
+    hw = sysfs_telemetry.sample()  # in-process sysfs channels (Jetson); {} elsewhere
+    if hw:
+        out["sysfs"] = hw
+    return jsonify(out)
 
 
 # ── Validation / test mode ────────────────────────────────────────────────────

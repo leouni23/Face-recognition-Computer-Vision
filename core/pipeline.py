@@ -10,6 +10,7 @@ from loguru import logger
 from config.settings import get_settings
 from core.detector import FaceLocation, detect_and_encode, detect_faces, embed_faces
 from core.geometry import project_point, project_polar
+from core.jetson_sysfs import sysfs_telemetry
 from core.perfcounters import perf_counters
 from core.profile import get_profile
 from core.metrics import PerfTracker
@@ -303,6 +304,9 @@ class FaceIdPipeline:
             if cyc1 is not None:
                 out["cycles"] = cyc1[0] - cyc0[0]
                 out["instructions"] = cyc1[1] - cyc0[1]
+        hw = sysfs_telemetry.sample()   # in-process sysfs snapshot, TTL-cached, synced to frame
+        if hw:
+            out["hw"] = hw
         return out
 
     def _process_optimized(self, frame, camera_id, prof, instrument, recording,
