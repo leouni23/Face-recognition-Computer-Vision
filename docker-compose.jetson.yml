@@ -42,6 +42,15 @@ services:
       # Docker socket: lets the UI "Spegni" run `docker stop faceid` with no extra run flag.
       # SECURITY: gives the container host-root via Docker. Single-user box only; set WEB_PASSWORD.
       - /var/run/docker.sock:/var/run/docker.sock
+      # In-process hardware telemetry (core/jetson_sysfs.py): read-only sysfs nodes tegrastats
+      # itself reads. No --privileged. If a path is absent on another board the mount fails →
+      # mount its stable parent instead. actmon (EMC util) is optional.
+      - /sys/devices/gpu.0:/sys/devices/gpu.0:ro                             # GPU load
+      - /sys/bus/i2c/drivers/ina3221x:/sys/bus/i2c/drivers/ina3221x:ro       # power rails (INA3221)
+      - /sys/class/thermal:/sys/class/thermal:ro                            # temperatures
+      - /sys/devices/system/cpu:/sys/devices/system/cpu:ro                  # CPU frequencies
+      - /sys/class/devfreq:/sys/class/devfreq:ro                            # GPU / EMC frequencies
+      - /sys/kernel/actmon_avg_activity:/sys/kernel/actmon_avg_activity:ro  # EMC utilization (optional)
     entrypoint: ["python3", "main.py", "--web", "--host", "0.0.0.0"]
     devices:
       - "/dev/video1:/dev/video0"          # USB UVC camera (Logitech); CSI /dev/video0 needs nvargus-daemon (unavailable in container)

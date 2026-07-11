@@ -657,6 +657,38 @@ TensorRT.
   destinazione (request o `VALIDATION_DIR`) e **ri-valida** la destinazione allo start
   (esistente+scrivibile) — l'obbligo non è più solo nel wizard.
 
+### 11.7 Telemetria hardware per-embedding (sysfs in-process)
+
+Durante QUALSIASI validazione il software registra DA SOLO — senza tegrastats, script o
+orchestratori — lo stato hardware per ogni embedding, letto in-process da **sysfs** (tegrastats è
+solo un frontend su quei file) e salvato nei normali JSON di sessione sulla SD. Modulo
+`core/jetson_sysfs.py` (zero dipendenze, py3.6): auto-discovery dei nodi al primo campione, cache
+TTL **20 ms** (a 30 fps ~1 lettura reale/frame), costo del campione misurato e loggato una volta,
+degradazione elegante su x86/nodi assenti. I nodi sono bind-montati **read-only** nel container
+(vedi `docker-compose.jetson.yml`); nessun `--privileged`.
+
+**Canali e sorgenti sysfs (TX2 / L4T r32.7):**
+
+| campo | unità | sorgente sysfs |
+| --- | --- | --- |
+| `gpu_load_pct` | % | `/sys/devices/gpu.0/load` (0–1000 ‰, /10) |
+| `power_mw{rail}` | mW | INA3221: `ina3221x/*/iio:device*/rail_name_N`+`in_powerN_input` (fallback hwmon `ina3221`) |
+| `temp_c{zona}` | °C | `/sys/class/thermal/thermal_zone*/{type,temp}` (m°C /1000) |
+| `freq_mhz{cpuN,gpu,emc}` | MHz | `cpu*/cpufreq/scaling_cur_freq` (kHz), devfreq `*gp10b*`/`*emc*/cur_freq` (Hz) |
+| `emc_util_pct` | % | freq EMC / EMC max (o `/sys/kernel/actmon_avg_activity/mc_all`) |
+| `throttling` | bool | best-effort: qualche CPU cur_freq < 0.9·max_freq |
+
+**Dove finiscono i dati:**
+- **Per-embedding** in `detections.jsonl` → chiave `hw{}` accanto a `t_ms{}`+`cycles`/`instructions`
+  (tutti i rail INA scoperti, sincronizzati al frame).
+- **Aggregati** in `session.json`: `hw_aggregate{canale:{mean,median,p95,peak}}` per ogni canale
+  numerico; `energy_per_id{total_uj,mean_uj,n}` = energia per identificazione (∫VDD_IN sul tempo di
+  embed; mW·ms = µJ); `telemetry_sampling_cost_us` (overhead del sampling); `throttling_frac`
+  (frazione di frame in throttling); `destination_device` (disco SD/USB/eMMC scritto).
+
+Il pannello live `/api/metrics` espone anche `sysfs{}` quando disponibile. Su board diverse dal TX2
+i canali assenti vengono semplicemente omessi (log una-tantum).
+
 ---
 
 ## 12. Bot Telegram
