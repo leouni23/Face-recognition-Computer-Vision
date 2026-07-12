@@ -453,8 +453,11 @@ function renderPresetList() {
        </div></div>`).join('') : '<div class="text-[11px] text-gray-600">Nessun preset. Creane uno qui sotto.</div>';
 }
 // subject registry
-function personOptions(sel){ return '<option value="">—</option>'+persons.map(p=>`<option value="${p.id}" ${p.id===sel?'selected':''}>${esc(p.name)} (#${p.id})</option>`).join(''); }
-function enrolledName(e){ const p=(persons||[]).find(x=>x.id===e.person_id); return p?p.name:null; }
+// Il suffisso _L/_S (modello dell'embedding) è SOLO visuale: i payload inviano person_id, i nomi
+// salvati (sessione/GT) restano puliti.
+function personLabel(p){ return p ? (p.name + (p.suffix || '')) : null; }
+function personOptions(sel){ return '<option value="">—</option>'+persons.map(p=>`<option value="${p.id}" ${p.id===sel?'selected':''}>${esc(p.name)}${esc(p.suffix||'')} (#${p.id})</option>`).join(''); }
+function enrolledName(e){ return personLabel((persons||[]).find(x=>x.id===e.person_id)); }
 function renderSubjects() {
   const er = document.getElementById('enrolled-rows');
   if (er) er.innerHTML = subjects.enrolled.map((e,i)=>{
@@ -521,7 +524,7 @@ function fillPresetPickers() {
 function participantsList(){
   const en = (subjects.enrolled||[]).map(e=>{
     const p = (persons||[]).find(x=>x.id===e.person_id);
-    return { label:e.label, person_id:e.person_id, name: p ? p.name : '(persona non mappata)' };
+    return { label:e.label, person_id:e.person_id, name: p ? personLabel(p) : '(persona non mappata)' };
   });
   const un = (subjects.unknown||[]).map(u=>({ label:u.label, person_id:null, name:'Sconosciuto' }));
   return en.concat(un);

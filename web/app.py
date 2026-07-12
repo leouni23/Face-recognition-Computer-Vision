@@ -307,9 +307,32 @@ def test_camera(camera_id: str):
     return jsonify({"ok": ok, "error": err, "snapshot": snapshot})
 
 
+def _active_pack() -> str:
+    """The recognition model pack ACTUALLY loaded (semaforo source); falls back to the requested
+    profile before the analyzer is built."""
+    from core.detector import get_loaded_info
+    from core.profile import get_profile
+    return (get_loaded_info() or {}).get("model_pack") or get_profile().model_pack
+
+
+def _person_suffix(packs, active_pack):
+    """UI-only model tag next to a name. Dual-pack → the ACTIVE model only (user rule); single
+    pack → that pack; no template → '' . Never stored, purely visual."""
+    from database.repository import pack_letter
+    if not packs:
+        return ""
+    if active_pack in packs or len(packs) > 1:
+        return "_" + pack_letter(active_pack)
+    return "_" + pack_letter(packs[0])
+
+
 @app.route("/api/persons")
 def list_persons():
+    from database.repository import pack_letter
+    active_pack = _active_pack()
     with get_session() as session:
+        repo = PersonRepository(session)
+        packs_by_person = repo.person_packs()
         persons = (
             session.query(Person)
             .filter(Person.active == True, Person.consent_given == True)
@@ -322,6 +345,10 @@ def list_persons():
                 "name": p.name,
                 "enrolled_at": p.enrolled_at.isoformat(),
                 "last_seen": p.last_seen.isoformat() if p.last_seen else None,
+                "packs": packs_by_person.get(p.id, []),
+                "suffix": _person_suffix(packs_by_person.get(p.id, []), active_pack),
+                "active_pack": active_pack,
+                "active_letter": pack_letter(active_pack),
             }
             for p in persons
         ])

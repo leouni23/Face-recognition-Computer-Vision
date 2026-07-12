@@ -727,6 +727,27 @@ i canali assenti vengono semplicemente omessi (log una-tantum).
   (bloccato senza destinazione validata o senza partecipanti). Back a ogni step; dopo lo stop
   riparte dallo step 1. Cartella giornaliera `validation/<YYYYMMDD>/` invariata.
 
+### 11.9 Isolamento embedding per-modello + tag _L/_S in UI
+
+Gli embedding dei due modelli vivono in spazi 512-d **incompatibili** (buffalo_l = w600k_r50,
+buffalo_s = w600k_mbf) e non devono MAI mischiarsi.
+
+- **Isolamento (backend, già attivo + rafforzato):** ogni `FaceTemplate` è taggato con
+  `model_pack = profilo attivo` alla registrazione (`add_template`, ora con assert che il pack sia
+  determinato). Il riconoscimento carica SOLO i template del pack attivo
+  (`load_all_templates(pack, require_pack=True)`): un pack mancante **solleva** invece di caricare un
+  mix. Le righe legacy con `model_pack` NULL non matchano mai e sono segnalate allo startup
+  (`count_untagged` → WARNING). Al reload dei template il log mostra
+  "Riconoscimento isolato sul modello '&lt;pack&gt;': N template". `/api/persons/templates/wipe` per
+  ripulire un DB legacy.
+- **Tag _L/_S (UI, solo visuale):** accanto a ogni nome compare il modello dell'embedding —
+  `_L` (buffalo_l) / `_S` (buffalo_s). Regola: utente registrato su **entrambi** i modelli → si
+  mostra il **modello attivo**; su uno solo → quello. `/api/persons` restituisce `packs`, `suffix`,
+  `active_pack`, `active_letter`. Il tag compare in: lista persone e rilevamenti recenti della
+  dashboard, overlay camera (`annotate_frame`), registro/riepilogo/menu della validazione. È
+  **display-only**: i payload inviano `person_id` e i nomi salvati (nome-sessione, ground-truth,
+  `detections.jsonl`, metriche) restano puliti, senza suffisso.
+
 ---
 
 ## 12. Bot Telegram

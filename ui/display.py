@@ -13,12 +13,17 @@ _FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
 def annotate_frame(frame: np.ndarray, results: List[RecognitionResult]) -> np.ndarray:
-    """Return a copy of `frame` with bounding boxes and labels drawn."""
+    """Return a copy of `frame` with bounding boxes and labels drawn. Known names get the active
+    model tag (_L / _S) — display only, on the frame pixels; the stored predicted_identity is
+    untouched (matching happened under the active pack, so the tag is truthful)."""
     out = frame.copy()
+    from core.profile import get_profile
+    from database.repository import pack_letter
+    suffix = "_" + pack_letter(get_profile().model_pack)
     for (top, right, bottom, left), pid, name, conf in results:
         color = _KNOWN_COLOR if pid is not None else _UNKNOWN_COLOR
         cv2.rectangle(out, (left, top), (right, bottom), color, 2)
-        label = f"{name} {conf:.0%}" if pid is not None else name
+        label = f"{name}{suffix} {conf:.0%}" if pid is not None else name
         cv2.rectangle(out, (left, bottom - 26), (right, bottom), color, cv2.FILLED)
         cv2.putText(out, label, (left + 4, bottom - 6), _FONT, 0.55, (255, 255, 255), 1)
     return out

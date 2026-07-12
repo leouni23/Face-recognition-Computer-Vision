@@ -487,7 +487,7 @@ es.onmessage = e => {
                   (known ? 'bg-emerald-950/60 border border-emerald-900/40' : 'bg-gray-900');
   div.innerHTML = `
     <span class="w-1.5 h-1.5 rounded-full flex-shrink-0 ${known ? 'bg-emerald-400' : 'bg-gray-600'}"></span>
-    <span class="flex-1 truncate font-medium ${known ? 'text-gray-100' : 'text-gray-500'}">${esc(d.name)}</span>
+    <span class="flex-1 truncate font-medium ${known ? 'text-gray-100' : 'text-gray-500'}">${esc(d.name)}${known && activeLetter ? '<span class="text-emerald-500 font-mono">_'+esc(activeLetter)+'</span>' : ''}</span>
     ${known ? `<span class="text-emerald-400 font-mono">${(d.confidence*100).toFixed(0)}%</span>` : ''}
     <span class="text-gray-600 tabular-nums flex-shrink-0">${esc(d.time)}</span>`;
   list.prepend(div);
@@ -496,8 +496,11 @@ es.onmessage = e => {
 
 
 // ── Persons ────────────────────────────────────────────────────────────────
+// Active-model letter (_L/_S) for live-recognition labels; kept in sync from /api/persons.
+let activeLetter = '';
 function loadPersons() {
   fetch('/api/persons').then(r => r.json()).then(persons => {
+    if (persons.length) activeLetter = persons[0].active_letter || activeLetter;
     const list = document.getElementById('person-list');
     list.innerHTML = '';
     if (!persons.length) {
@@ -515,7 +518,7 @@ function loadPersons() {
           ${esc(p.name.charAt(0).toUpperCase())}
         </div>
         <div class="flex-1 min-w-0">
-          <div class="text-sm font-medium truncate">${esc(p.name)}</div>
+          <div class="text-sm font-medium truncate">${esc(p.name)}<span class="text-emerald-500 font-mono">${esc(p.suffix||'')}</span></div>
           <div class="text-xs text-gray-500">Visto: ${esc(lastSeen)}</div>
         </div>`;
       const trajBtn = document.createElement('button');
@@ -777,7 +780,7 @@ function drawMap(people) {
     ctx.lineWidth = 2; ctx.strokeStyle = '#022c22'; ctx.stroke();
     ctx.fillStyle = '#d1fae5';
     ctx.font = `${Math.round(r * 1.6)}px sans-serif`;
-    ctx.fillText(p.name, p.world_x + r + 3, p.world_y + r / 2);
+    ctx.fillText(p.name + (activeLetter ? '_' + activeLetter : ''), p.world_x + r + 3, p.world_y + r / 2);
   });
   document.getElementById('map-info').textContent = people.length
     ? `${people.length} soggetto/i sulla mappa`
