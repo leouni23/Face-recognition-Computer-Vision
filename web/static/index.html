@@ -830,16 +830,36 @@ function pushPoint(chart, values) {
 
 function fmtMetric(v, unit = '') { return v == null ? '—' : `${v}${unit}`; }
 
-function renderResources(r) {
+// hw = payload sysfs (Jetson in-process). In container il backend `resources` è cpu-psutil
+// (tegrastats illeggibile) → gpu_* None: si ripiega sui canali sysfs reali.
+function hwTemp(hw, kind) {
+  const t = hw && hw.temp_c;
+  if (!t) return null;
+  const key = Object.keys(t).find(k => k.toLowerCase().includes(kind));
+  return key ? t[key] : null;
+}
+function renderResources(r, hw) {
+  hw = hw || null;
+  const usingSysfs = hw && r.gpu_util_pct == null;  // GPU dai canali sysfs (non NVML)
   document.getElementById('perf-backend').textContent =
-    r.gpu_name ? `${r.gpu_name} · ${r.backend}` : r.backend || '';
+    r.gpu_name ? `${r.gpu_name} · ${r.backend}`
+               : (usingSysfs ? `${r.backend || 'cpu-psutil'} + sysfs` : (r.backend || ''));
+  const gpuPct   = r.gpu_util_pct != null ? r.gpu_util_pct : (hw ? hw.gpu_load_pct : null);
+  const gpuTempC = r.gpu_temp_c   != null ? r.gpu_temp_c   : hwTemp(hw, 'gpu');
+  const cpuTempC = hwTemp(hw, 'cpu');
+  const rail = (hw && hw.power_mw) || {};
+  const gpuW = r.gpu_power_w != null ? r.gpu_power_w
+             : (rail.VDD_SYS_GPU != null ? +(rail.VDD_SYS_GPU / 1000).toFixed(1) : null);
+  const boardW = rail.VDD_IN != null ? +(rail.VDD_IN / 1000).toFixed(1) : null;
   const cards = [
-    ['GPU', fmtMetric(r.gpu_util_pct, '%')],
+    ['GPU', fmtMetric(gpuPct, '%')],
     ['GPU mem', r.gpu_mem_used_mb != null ? `${r.gpu_mem_used_mb}/${r.gpu_mem_total_mb} MB` : '—'],
-    ['GPU temp', fmtMetric(r.gpu_temp_c, '°C')],
-    ['GPU power', fmtMetric(r.gpu_power_w, ' W')],
+    ['GPU temp', fmtMetric(gpuTempC, '°C')],
+    ['GPU power', fmtMetric(gpuW, ' W')],
     ['CPU', fmtMetric(r.cpu_pct, '%')],
+    ['CPU temp', fmtMetric(cpuTempC, '°C')],
     ['RAM', r.ram_used_mb != null ? `${(r.ram_used_mb/1000).toFixed(1)}/${(r.ram_total_mb/1000).toFixed(1)} GB` : '—'],
+    ['Board', fmtMetric(boardW, ' W')],
   ];
   document.getElementById('resource-cards').innerHTML = cards.map(([k, v]) =>
     `<div class="bg-gray-900 rounded-xl px-3 py-2">
@@ -872,7 +892,7 @@ function renderPerfTable(perf) {
 
 function pollMetrics() {
   fetch('/api/metrics').then(r => r.json()).then(d => {
-    renderResources(d.resources || {});
+    renderResources(d.resources || {}, d.sysfs || null);
     renderPerfTable(d.perf || {});
     // aggregate the first camera's latency for the time-series (or zeros)
     const cams = (d.perf && d.perf.cameras) || {};
