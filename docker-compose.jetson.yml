@@ -51,10 +51,12 @@ services:
       - /sys/devices/system/cpu:/sys/devices/system/cpu:ro                  # CPU frequencies
       - /sys/class/devfreq:/sys/class/devfreq:ro                            # GPU / EMC frequencies
       - /sys/kernel/actmon_avg_activity:/sys/kernel/actmon_avg_activity:ro  # EMC utilization (optional)
-      # Board model for the platform label (jetson-tx2 vs arm64): /proc/device-tree isn't visible
-      # in the container by default. Mount the model node read-only. If absent on another board the
-      # mount fails → fall back to mounting the whole /proc/device-tree:ro.
-      - /proc/device-tree/model:/proc/device-tree/model:ro
+      # Board family for the platform label (jetson-tx2 vs arm64). The device-tree `compatible`
+      # node carries the SoC id (nvidia,tegra186 = TX2); the `model` node is just a codename
+      # ("quill") with no usable token. It MUST be mounted to a REGULAR path (/run/...): a bind
+      # mount inside the virtual /proc/device-tree or /sys/firmware/devicetree/base is shadowed and
+      # unreadable in the container. core/metrics.py reads /run/board-compatible.
+      - /sys/firmware/devicetree/base/compatible:/run/board-compatible:ro
     entrypoint: ["python3", "main.py", "--web", "--host", "0.0.0.0"]
     devices:
       - "/dev/video1:/dev/video0"          # USB UVC camera (Logitech); CSI /dev/video0 needs nvargus-daemon (unavailable in container)

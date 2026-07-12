@@ -295,22 +295,53 @@ def _slug_gpu(name: str) -> str:
 _jetson_model_warned = False
 
 
+# SoC compatible string (tegraNNN) → board family. Robust across L4T: the device-tree `model`
+# node is a marketing codename ("quill" on the TX2) with no tx2/jetson/tegra token, so matching it
+# fails; the `compatible` node always carries the SoC id (e.g. "nvidia,tegra186").
+_TEGRA_SOC = [
+    ("tegra186", "tx2"), ("tegra194", "xavier"), ("tegra234", "orin"), ("tegra210", "nano"),
+]
+# Read order: /run/board-compatible is the container mount (a REGULAR path — bind-mounting inside
+# the virtual /proc/device-tree or /sys/firmware/devicetree/base is SHADOWED and unreadable in the
+# container, which is why the earlier /proc/device-tree/model mount never worked). Then the host
+# device-tree paths for bare-metal / other setups.
+_COMPATIBLE_PATHS = (
+    "/run/board-compatible",
+    "/sys/firmware/devicetree/base/compatible",
+    "/proc/device-tree/compatible",
+)
+
+
 def _jetson_model() -> Optional[str]:
-    """Read the Jetson board name from the device tree → jetson-tx2 / jetson-orin / …
-    Inside the container /proc/device-tree must be bind-mounted (docker-compose.jetson.yml);
-    if it's unreadable we log the reason ONCE and fall back to the arch label."""
+    """Board family from the device-tree `compatible` SoC id → jetson-tx2 / jetson-orin / …
+    The compatible node is bind-mounted into the container at /run/board-compatible (regular path).
+    If nothing is readable we log the reason ONCE and fall back to the arch label."""
     global _jetson_model_warned
-    try:
-        txt = Path("/proc/device-tree/model").read_text(errors="ignore").lower()
-    except Exception as exc:
-        if not _jetson_model_warned and Path("/etc/nv_tegra_release").exists():
-            _jetson_model_warned = True
-            logger.info("Platform: /proc/device-tree/model illeggibile ({}); montalo read-only nel "
-                        "compose per l'etichetta jetson-* — fallback su arch".format(exc))
-        return None
+    txt = None
+    for p in _COMPATIBLE_PATHS:
+        try:
+            # compatible is a NUL-separated list of byte strings (e.g. nvidia,quill\0nvidia,tegra186)
+            txt = Path(p).read_bytes().decode("ascii", "ignore").lower()
+            break
+        except Exception:
+            continue
+    if txt is None:
+        # Last resort: the model codename (rarely useful, but keep the legacy behaviour).
+        try:
+            txt = Path("/proc/device-tree/model").read_text(errors="ignore").lower()
+        except Exception as exc:
+            if not _jetson_model_warned and Path("/etc/nv_tegra_release").exists():
+                _jetson_model_warned = True
+                logger.info("Platform: device-tree compatible illeggibile ({}); monta "
+                            "/sys/firmware/devicetree/base/compatible:/run/board-compatible:ro nel "
+                            "compose per l'etichetta jetson-* — fallback su arch".format(exc))
+            return None
+    for soc, board in _TEGRA_SOC:
+        if soc in txt:
+            return "jetson-" + board
     for key in ("tx2", "orin", "xavier", "nano", "tx1"):
         if key in txt:
-            return f"jetson-{key}"
+            return "jetson-" + key
     return "jetson" if "jetson" in txt or "tegra" in txt else None
 
 
