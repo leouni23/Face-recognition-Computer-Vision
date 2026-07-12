@@ -14,6 +14,11 @@ from privacy.crypto import decrypt_embedding, encrypt_embedding
 _settings = get_settings()
 
 
+def pack_letter(pack: Optional[str]) -> str:
+    """Short model tag for the UI: buffalo_l→'L', buffalo_s→'S'. '' if unknown/untagged."""
+    return (pack or "").rsplit("_", 1)[-1].upper()
+
+
 class PersonRepository:
     def __init__(self, session: Session):
         self.session = session
@@ -37,13 +42,40 @@ class PersonRepository:
 
     def add_template(self, person: Person, encoding: np.ndarray) -> FaceTemplate:
         # Tag the embedding with the recognition model that produced it (active profile pack),
-        # so matching never mixes incompatible embedding spaces across profiles.
+        # so matching never mixes incompatible embedding spaces across profiles. The tag is
+        # MANDATORY — a template without a pack could never be matched (dead data) and would blur
+        # the per-model isolation, so refuse to write one.
         from core.profile import get_profile
+        pack = get_profile().model_pack
+        if not pack:
+            raise ValueError("model_pack attivo non determinato: impossibile registrare l'embedding")
         encrypted = encrypt_embedding(encoding, _settings.biometric_secret_key)
-        template = FaceTemplate(person_id=person.id, encoding_encrypted=encrypted,
-                                model_pack=get_profile().model_pack)
+        template = FaceTemplate(person_id=person.id, encoding_encrypted=encrypted, model_pack=pack)
         self.session.add(template)
         return template
+
+    def person_packs(self) -> dict:
+        """{person_id: [model packs with ≥1 template]} for active, consenting people — lets the UI
+        tag each name with the model its embedding belongs to (_L / _S)."""
+        rows = (
+            self.session.query(FaceTemplate.person_id, FaceTemplate.model_pack)
+            .join(Person)
+            .filter(Person.active == True, Person.consent_given == True,
+                    FaceTemplate.model_pack != None)  # noqa: E711 (SQL NULL check)
+            .distinct()
+            .all()
+        )
+        out = {}
+        for pid, pack in rows:
+            out.setdefault(pid, []).append(pack)
+        for pid in out:
+            out[pid].sort()
+        return out
+
+    def count_untagged(self) -> int:
+        """Legacy templates with NULL model_pack: they can never match any profile (the recognition
+        path always filters by pack), so they are dead data — surfaced at startup as a warning."""
+        return self.session.query(FaceTemplate).filter(FaceTemplate.model_pack == None).count()  # noqa: E711
 
     def delete_all_templates(self) -> int:
         """Drop every face template (keeps persons + consent). One-off cleanup for the polluted,
@@ -60,10 +92,16 @@ class PersonRepository:
             .count()
         )
 
-    def load_all_templates(self, model_pack: Optional[str] = None) -> List[Tuple[int, str, np.ndarray]]:
+    def load_all_templates(self, model_pack: Optional[str] = None,
+                           require_pack: bool = False) -> List[Tuple[int, str, np.ndarray]]:
         """Return (person_id, name, encoding) for active, consenting people. When `model_pack`
         is given, only templates from that recognition model (embeddings from other packs are in
-        an incompatible space and must not be matched against)."""
+        an incompatible space and must not be matched against). The recognition path passes
+        `require_pack=True`: a missing pack then raises instead of silently loading a MIX of
+        incompatible embedding spaces (the whole point of per-model isolation)."""
+        if require_pack and not model_pack:
+            raise ValueError("load_all_templates: model_pack obbligatorio nel percorso di "
+                             "riconoscimento (isolamento per-modello)")
         q = (
             self.session.query(Person, FaceTemplate)
             .join(FaceTemplate)

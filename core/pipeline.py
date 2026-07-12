@@ -65,16 +65,24 @@ class FaceIdPipeline:
         with self._reload_lock:
             if now - self._last_reload < self._TEMPLATE_RELOAD_INTERVAL:
                 return
+            active_pack = get_profile().model_pack
             with get_session() as session:
                 # Only templates from the active profile's recognition model (embeddings from a
-                # different pack are in an incompatible space → would never match).
-                templates = PersonRepository(session).load_all_templates(get_profile().model_pack)
+                # different pack are in an incompatible space → would never match). require_pack
+                # makes a missing pack raise instead of silently loading a cross-model mix.
+                templates = PersonRepository(session).load_all_templates(active_pack, require_pack=True)
                 projectors = {
                     p["camera_id"]: p["params"]
                     for p in CalibrationRepository(session).load_projectors()
                 }
             self._recognizer.load(templates)
             self._projectors = projectors
+            # Surface the per-model isolation: log the pack + count whenever it changes, so the
+            # operator sees that only the active model's embeddings are in play.
+            if active_pack != getattr(self, "_last_pack_logged", None):
+                self._last_pack_logged = active_pack
+                logger.info(f"Riconoscimento isolato sul modello '{active_pack}': "
+                            f"{len(templates)} template caricati (altri pack esclusi)")
             self._last_reload = now
             logger.debug(
                 f"Template ricaricati: {len(templates)} persona/e, "

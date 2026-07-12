@@ -95,6 +95,15 @@ def main() -> None:
     Base.metadata.create_all(engine)
     migrate_schema()  # idempotent: adds FaceTemplate.model_pack to an existing DB
 
+    # Legacy templates without a model_pack tag can never match any profile (the recognition path
+    # filters strictly by the active pack) → dead data that also blurs per-model isolation.
+    from database.repository import PersonRepository
+    with get_session() as session:
+        untagged = PersonRepository(session).count_untagged()
+    if untagged:
+        logger.warning(f"{untagged} template legacy SENZA model_pack: non verranno mai riconosciuti "
+                       "(isolamento per-modello). Ri-registra i soggetti o usa /api/persons/templates/wipe.")
+
     with get_session() as session:
         deleted = run_retention(session, _settings.data_retention_days)
     if deleted:
