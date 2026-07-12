@@ -97,6 +97,25 @@ FaceData = Tuple[FaceLocation, np.ndarray]  # location + 512-d ArcFace embedding
 _analyzer = None
 _analyzer_lock = threading.Lock()
 
+# Build epoch: bumped on every profile change. A build captures the epoch at its start; before
+# publishing _analyzer it checks the epoch is still current, else discards its result. Prevents a
+# slow warm-up of the PREVIOUS profile, finishing after a newer rebuild, from clobbering the new
+# analyzer (rapid profile switches).
+_build_epoch = 0
+_epoch_lock = threading.Lock()
+
+
+def _bump_epoch() -> int:
+    global _build_epoch
+    with _epoch_lock:
+        _build_epoch += 1
+        return _build_epoch
+
+
+def _current_epoch() -> int:
+    with _epoch_lock:
+        return _build_epoch
+
 # Warm-up progress (model load is ~9 min on the TX2 pure-python protobuf base). Instrumented in
 # _build_analyzer; read by GET /api/warmup so the UI can show a % bar that auto-hides when ready.
 _warmup_state = {"active": False, "phase": "", "pct": 0.0, "eta_s": None, "ready": False}
@@ -371,20 +390,27 @@ def _rebuild_worker() -> None:
     while True:
         try:
             prof = get_profile()
+            epoch = _current_epoch()
             logger.info(f"InsightFace: ricostruzione analyzer in background (profilo '{prof.name}')...")
             new = _build_analyzer()
-            with _analyzer_lock:
-                old = _analyzer
-                _analyzer = new
-            _dispose_analyzer(old)  # free the old onnxruntime/TensorRT native memory (TX2 8 GB)
-            _warmup_done()
-            logger.info("InsightFace: nuovo profilo attivo (analyzer sostituito senza riavvio)")
-            if get_settings().profile_switch_restart:
-                # Fallback: onnxruntime r32.7 may not release native arenas in-process. Exit so
-                # Docker (restart: unless-stopped) brings the process back fresh on the new profile
-                # (already persisted to .env) — zero leak, ~seconds feed gap.
-                logger.warning("profile_switch_restart attivo: riavvio pulito del processo per liberare la GPU")
-                os._exit(0)
+            if epoch != _current_epoch():
+                # A newer switch arrived while we built → our result is stale. Discard it (free the
+                # native memory) and loop to rebuild for the latest profile; never publish.
+                logger.info("InsightFace: build obsoleta (epoch superata) — scartata")
+                _dispose_analyzer(new)
+            else:
+                with _analyzer_lock:
+                    old = _analyzer
+                    _analyzer = new
+                _dispose_analyzer(old)  # free the old onnxruntime/TensorRT native memory (TX2 8 GB)
+                _warmup_done()
+                logger.info("InsightFace: nuovo profilo attivo (analyzer sostituito senza riavvio)")
+                if get_settings().profile_switch_restart:
+                    # Fallback: onnxruntime r32.7 may not release native arenas in-process. Exit so
+                    # Docker (restart: unless-stopped) brings the process back fresh on the new
+                    # profile (already persisted) — zero leak, ~seconds feed gap.
+                    logger.warning("profile_switch_restart attivo: riavvio pulito del processo per liberare la GPU")
+                    os._exit(0)
         except Exception:
             logger.exception("Ricostruzione profilo fallita; mantengo l'analyzer precedente")
             _warmup_set(active=False)
@@ -402,8 +428,10 @@ def reset_for_profile_change() -> None:
     and is swapped in atomically; the previous analyzer keeps serving frames meanwhile, so the
     camera feed and web UI stay responsive. Rapid switches are coalesced to the latest profile."""
     global _rebuilding, _rebuild_again
+    _bump_epoch()  # invalidate any in-flight build (incl. the initial warm-up) for the old profile
     if _analyzer is None:
-        # Never built yet → the lazy first build in _get_analyzer (warm-up) handles it.
+        # Never built yet → the lazy first build in _get_analyzer (warm-up) handles it. The epoch
+        # bump makes that build re-check and discard if it's now for a superseded profile.
         return
     with _rebuild_state_lock:
         if _rebuilding:
@@ -426,8 +454,20 @@ def _get_analyzer():
     if _analyzer is None:
         with _analyzer_lock:
             if _analyzer is None:
-                _analyzer = _build_analyzer()
-                _warmup_done()
+                epoch = _current_epoch()
+                built = _build_analyzer()
+                if _analyzer is None and epoch == _current_epoch():
+                    _analyzer = built
+                    _warmup_done()
+                elif _analyzer is None:
+                    # A profile switch landed during this slow first build → it's for the old
+                    # profile. Publish it anyway so the app has SOME analyzer (rebuild will follow),
+                    # but let reset_for_profile_change's queued rebuild converge to the new profile.
+                    _analyzer = built
+                    _warmup_done()
+                    reset_for_profile_change()
+                else:
+                    _dispose_analyzer(built)  # a rebuild already published → drop our stale build
     return _analyzer
 
 def _faces_to_data(faces) -> List[FaceData]:
