@@ -42,16 +42,15 @@
 
   <main class="p-5 max-w-7xl mx-auto space-y-5">
 
-    <!-- ══ Configurazione (una volta) ══ -->
-    <details class="bg-gray-900 rounded-2xl">
-      <summary class="px-4 py-3 flex items-center gap-2">
+    <!-- ══ Configurazione esperimento (sempre in alto): SOLO preset + disco destinazione ══ -->
+    <section class="bg-gray-900 rounded-2xl">
+      <div class="px-4 py-3 flex items-center gap-2 border-b border-gray-800/60">
         <span class="text-xs font-semibold text-gray-400 uppercase tracking-widest">⚙ Configurazione esperimento</span>
-        <span class="text-[11px] text-gray-600">preset di condizione + registro soggetti (si imposta una volta)</span>
-        <span class="ml-auto text-gray-600 text-xs">apri/chiudi</span>
-      </summary>
-      <div class="px-4 pb-4 grid grid-cols-1 lg:grid-cols-2 gap-5 border-t border-gray-800/60 pt-4">
+        <span class="text-[11px] text-gray-600">preset di condizione + memoria di destinazione (il registro soggetti è nella nuova sessione)</span>
+      </div>
+      <div class="px-4 pb-4 grid grid-cols-1 lg:grid-cols-2 gap-5 pt-4">
 
-        <!-- Preset CRUD -->
+        <!-- Preset CRUD (sinistra) -->
         <div class="space-y-3">
           <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Preset di condizione</h3>
           <div id="preset-list" class="space-y-1.5"></div>
@@ -87,25 +86,32 @@
           </div>
         </div>
 
-        <!-- Subject registry -->
-        <div class="space-y-3">
-          <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Registro soggetti</h3>
-          <div class="text-[11px] text-gray-600">Iscritti S<i>n</i> → mappati a una persona della galleria (mate). Sconosciuti U<i>n</i> → solo numero, anonimi (non-mate).</div>
-          <div>
-            <div class="text-[11px] text-gray-500 mb-1">Iscritti (S)</div>
-            <div id="enrolled-rows" class="space-y-1.5"></div>
-            <button onclick="addEnrolled()" class="mt-1.5 text-xs text-emerald-400 hover:text-emerald-300">+ aggiungi iscritto</button>
+        <!-- Destinazione dati (destra) — OBBLIGATORIA -->
+        <div class="space-y-3 lg:border-l lg:border-gray-800 lg:pl-5">
+          <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Memoria di destinazione <b class="text-amber-400">(obbligatoria)</b></h3>
+          <div class="text-[11px] text-gray-600">Dove salvare gli artefatti di sessione. Scegli un disco reale e <b>valida</b>; l'ultima scelta viene ricordata.</div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="detectDrives()" class="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-sm">🔄 Rileva dischi</button>
+            <select id="drive-sel" class="fld" onchange="onDrivePick()"><option value="">— interno (default) —</option></select>
           </div>
-          <div>
-            <div class="text-[11px] text-gray-500 mb-1">Sconosciuti (U)</div>
-            <div id="unknown-rows" class="flex flex-wrap gap-1.5"></div>
-            <button onclick="addUnknown()" class="mt-1.5 text-xs text-sky-400 hover:text-sky-300">+ aggiungi sconosciuto</button>
+          <div class="flex flex-wrap items-center gap-2">
+            <input id="dest-path" class="fld flex-1 min-w-[10rem]" placeholder="…oppure percorso manuale (già montato)" />
+            <input id="dest-minutes" class="fld w-24" type="number" placeholder="min" value="30" title="durata stimata per il check spazio" />
+            <button onclick="validateDest()" class="px-3 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-sm font-semibold">Valida</button>
           </div>
-          <button onclick="saveSubjects()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold">Salva registro</button>
-          <span id="subjects-msg" class="text-xs text-gray-500 ml-2"></span>
+          <div id="dest-status" class="text-xs">Scegli e <b>valida</b> la destinazione.</div>
         </div>
       </div>
-    </details>
+
+      <!-- Revisione verità a terra: toggle CHIUSO di default, separato dal flusso nuova sessione -->
+      <details class="border-t border-gray-800/60">
+        <summary class="px-4 py-2.5 flex items-center gap-2 cursor-pointer">
+          <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">▸ Revisione verità a terra</span>
+          <span class="text-[11px] text-gray-600">etichettatura a posteriori dei video — non serve durante il test</span>
+        </summary>
+        <div id="gt-review-host" class="px-4 pb-4"></div>
+      </details>
+    </section>
 
     <!-- ══ Nuova sessione (wizard) / Sessione in corso (summary) ══ -->
     <!-- Le sessioni finiscono AUTOMATICAMENTE nella cartella del giorno validation/<YYYYMMDD>/ -->
@@ -116,36 +122,14 @@
         <div class="ml-auto flex items-center gap-1.5" id="step-dots"></div>
       </div>
 
-      <!-- Step 1 — preset (sx) + destinazione OBBLIGATORIA (dx) -->
-      <div data-step="1" class="wiz-step hidden grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div class="space-y-2">
-          <div class="text-sm font-semibold text-gray-300">1a · Preset di condizione</div>
-          <div class="text-[11px] text-gray-600">Verifica che esista il preset per le condizioni di oggi (camera/luci). Creazione/modifica in ⚙ Configurazione qui sopra.</div>
-          <div id="wiz-preset-list" class="space-y-1 text-xs"></div>
-        </div>
-        <div class="space-y-2 lg:border-l lg:border-gray-800 lg:pl-4">
-          <div class="text-sm font-semibold text-gray-300">1b · Destinazione dati <b class="text-amber-400">(obbligatoria)</b></div>
-          <div class="flex flex-wrap items-center gap-2">
-            <button onclick="detectDrives()" class="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-sm">🔄 Rileva dischi</button>
-            <select id="drive-sel" class="fld" onchange="onDrivePick()"><option value="">— interno (default) —</option></select>
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <input id="dest-path" class="fld flex-1 min-w-[10rem]" placeholder="…oppure percorso manuale (già montato)" />
-            <input id="dest-minutes" class="fld w-24" type="number" placeholder="min" value="30" title="durata stimata per il check spazio" />
-            <button onclick="validateDest()" class="px-3 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-sm font-semibold">Valida</button>
-          </div>
-          <div id="dest-status" class="text-xs">Scegli e <b>valida</b> la destinazione per proseguire.</div>
-        </div>
-      </div>
-
-      <!-- Step 2 — tipo sessione + modalità -->
-      <div data-step="2" class="wiz-step space-y-3 hidden">
-        <div class="text-sm font-semibold text-gray-300">2 · Tipo di sessione</div>
+      <!-- Step 1 — tipo sessione (obbligatorio) + modalità acquisizione -->
+      <div data-step="1" class="wiz-step space-y-3 hidden">
+        <div class="text-sm font-semibold text-gray-300">1 · Tipo di sessione <b class="text-amber-400">(obbligatorio)</b></div>
         <div class="flex flex-wrap gap-2">
-          <button onclick="pickType('crossing')" id="type-crossing" class="truth-btn">Singolo — attraversamenti (anche più utenti registrati)</button>
+          <button onclick="pickType('crossing')" id="type-crossing" class="truth-btn">Singola — attraversamenti (anche più utenti registrati)</button>
           <button onclick="pickType('common')" id="type-common" class="truth-btn">Gruppo — soggetti statici</button>
         </div>
-        <div class="text-sm font-semibold text-gray-300 pt-1">Modalità verità a terra</div>
+        <div class="text-sm font-semibold text-gray-300 pt-1">Modalità di acquisizione</div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <button onclick="pickMode('mapping')" id="mode-mapping" class="truth-btn text-left !items-start flex-col gap-1 p-3">
             <span class="font-semibold">🗺 Mappatura (senza video)</span>
@@ -158,24 +142,37 @@
         </div>
       </div>
 
-      <!-- Step 3 — soggetti dal registro (multi, NOMI COMPLETI) -->
+      <!-- Step 2 — REGISTRO SOGGETTI inline (compare dopo la scelta del tipo). NOMI COMPLETI. -->
+      <div data-step="2" class="wiz-step space-y-3 hidden">
+        <div class="text-sm font-semibold text-gray-300">2 · Registro soggetti <span id="wiz-type-label" class="text-[11px] text-gray-500"></span></div>
+        <div class="text-[11px] text-gray-600">Iscritti S<i>n</i> → mappati a una persona della galleria (mate, <b>nome completo sempre visibile</b>). Sconosciuti U<i>n</i> → anonimi (non-mate). I soggetti qui salvati sono i partecipanti della sessione.</div>
+        <div>
+          <div class="text-[11px] text-gray-500 mb-1">Iscritti (S)</div>
+          <div id="enrolled-rows" class="space-y-1.5"></div>
+          <button onclick="addEnrolled()" class="mt-1.5 text-xs text-emerald-400 hover:text-emerald-300">+ aggiungi iscritto</button>
+        </div>
+        <div>
+          <div class="text-[11px] text-gray-500 mb-1">Sconosciuti (U)</div>
+          <div id="unknown-rows" class="flex flex-wrap gap-1.5"></div>
+          <button onclick="addUnknown()" class="mt-1.5 text-xs text-sky-400 hover:text-sky-300">+ aggiungi sconosciuto</button>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="saveSubjects()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold">Salva registro</button>
+          <span id="subjects-msg" class="text-xs text-gray-500"></span>
+        </div>
+        <div id="wiz-participants" class="text-xs text-emerald-300"></div>
+      </div>
+
+      <!-- Step 3 — preset per la sessione (default: ultimo usato) -->
       <div data-step="3" class="wiz-step space-y-2 hidden">
-        <div class="text-sm font-semibold text-gray-300">3 · Partecipanti (dal registro)</div>
-        <div class="text-[11px] text-gray-600">Seleziona uno o più soggetti registrati — i nomi completi restano visibili e spuntati. Il nome della sessione sarà generato da questa selezione.</div>
-        <div id="wiz-subjects" class="space-y-1"></div>
-        <div id="wiz-subjects-picked" class="text-xs text-emerald-300"></div>
-      </div>
-
-      <!-- Step 4 — preset per la sessione (default: ultimo usato) -->
-      <div data-step="4" class="wiz-step space-y-2 hidden">
-        <div class="text-sm font-semibold text-gray-300">4 · Preset di condizione per questa sessione</div>
+        <div class="text-sm font-semibold text-gray-300">3 · Preset di condizione per questa sessione</div>
         <select id="preset-pick" class="fld w-full" onchange="onPresetPick()"></select>
-        <div class="text-[11px] text-gray-600">Default = ultimo usato. Nuovo preset → ⚙ Configurazione, poi torna qui.</div>
+        <div class="text-[11px] text-gray-600">Default = ultimo usato. Nuovo preset → ⚙ Configurazione esperimento in alto, poi torna qui.</div>
       </div>
 
-      <!-- Step 5 — riepilogo + nome AUTO-generato -->
-      <div data-step="5" class="wiz-step space-y-3 hidden">
-        <div class="text-sm font-semibold text-gray-300">5 · Riepilogo</div>
+      <!-- Step 4 — riepilogo + nome AUTO-generato -->
+      <div data-step="4" class="wiz-step space-y-3 hidden">
+        <div class="text-sm font-semibold text-gray-300">4 · Riepilogo</div>
         <div id="wiz-summary" class="bg-gray-950 rounded-xl p-3 text-sm space-y-1"></div>
         <div class="bg-gray-950 rounded-xl p-3">
           <div class="text-[11px] text-gray-500">Nome sessione (generato automaticamente — non modificabile)</div>
@@ -243,8 +240,8 @@
       <button onclick="stopSession()" class="big-btn bg-red-600 hover:bg-red-500 w-full">■ Ferma sessione</button>
     </section>
 
-    <!-- ══ Revisione & verità a terra (review) ══ -->
-    <section class="space-y-3">
+    <!-- ══ Revisione & verità a terra (review) — spostata nel toggle di Configurazione a init ══ -->
+    <section id="gt-review-section" class="space-y-3">
       <div class="flex flex-wrap items-center gap-2">
         <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Revisione &amp; verità a terra</h2>
         <span id="sess-meta" class="text-[11px] text-gray-600"></span>
@@ -457,19 +454,24 @@ function renderPresetList() {
 }
 // subject registry
 function personOptions(sel){ return '<option value="">—</option>'+persons.map(p=>`<option value="${p.id}" ${p.id===sel?'selected':''}>${esc(p.name)} (#${p.id})</option>`).join(''); }
+function enrolledName(e){ const p=(persons||[]).find(x=>x.id===e.person_id); return p?p.name:null; }
 function renderSubjects() {
   const er = document.getElementById('enrolled-rows');
-  er.innerHTML = subjects.enrolled.map((e,i)=>
-    `<div class="flex items-center gap-2">
+  if (er) er.innerHTML = subjects.enrolled.map((e,i)=>{
+    const nm = enrolledName(e);
+    return `<div class="flex items-center gap-2">
        <span class="text-xs font-mono text-emerald-400 w-8">${esc(e.label)}</span>
-       <select class="fld flex-1" data-ei="${i}">${personOptions(e.person_id)}</select>
+       <select class="fld flex-1" data-ei="${i}" onchange="onEnrolledPick(${i}, this.value)">${personOptions(e.person_id)}</select>
+       <span class="text-xs ${nm?'text-emerald-300':'text-amber-500'} min-w-[7rem]">${nm?('— '+esc(nm)):'(mappa una persona)'}</span>
        <button onclick="rmEnrolled(${i})" class="text-gray-600 hover:text-red-400 text-xs">✕</button>
-     </div>`).join('');
+     </div>`; }).join('');
   const ur = document.getElementById('unknown-rows');
-  ur.innerHTML = subjects.unknown.map((u,i)=>
+  if (ur) ur.innerHTML = subjects.unknown.map((u,i)=>
     `<span class="inline-flex items-center gap-1 bg-gray-950 rounded-lg px-2 py-1 text-xs font-mono text-sky-400">${esc(u.label)}
        <button onclick="rmUnknown(${i})" class="text-gray-600 hover:text-red-400">✕</button></span>`).join('');
+  refreshParticipants();
 }
+function onEnrolledPick(i, val){ subjects.enrolled[i].person_id = val ? +val : null; renderSubjects(); }
 function addEnrolled(){ subjects.enrolled.push({label:'S'+(subjects.enrolled.length+1), person_id:null}); renderSubjects(); }
 function rmEnrolled(i){ subjects.enrolled.splice(i,1); subjects.enrolled.forEach((e,k)=>e.label='S'+(k+1)); renderSubjects(); }
 function addUnknown(){ subjects.unknown.push({label:'U'+(subjects.unknown.length+1)}); renderSubjects(); }
@@ -483,8 +485,10 @@ function saveSubjects() {
 function subjectLabels(){ return [...subjects.enrolled.map(e=>e.label), ...subjects.unknown.map(u=>u.label)]; }
 
 // ════ Wizard ════
-let wiz = { step:1, maxStep:5, recordVideo:null, modeOk:false, destination:'', destOk:false,
-            sessionType:'crossing', typeOk:true, subjects:[], presetId:'', presetOk:false };
+// Steps: 1 tipo+modalità · 2 registro soggetti (CRUD inline) · 3 preset · 4 riepilogo+nome auto.
+// La destinazione disco è validata in ⚙ Configurazione esperimento (destOk), non è uno step.
+let wiz = { step:1, maxStep:4, recordVideo:null, modeOk:false, destination:'', destOk:false,
+            sessionType:null, typeOk:false, presetId:'', presetOk:false };
 function pickMode(m){
   wiz.recordVideo = (m==='video'); wiz.modeOk = true;
   ['mapping','video'].forEach(k=>{
@@ -495,10 +499,9 @@ function pickMode(m){
 }
 function stepSatisfied(step){
   switch(step){
-    case 1: return wiz.destOk;                       // destinazione validata (OBBLIGATORIA)
-    case 2: return wiz.typeOk && wiz.modeOk;         // tipo + modalità scelti
-    case 3: return wiz.subjects.length >= 1;         // almeno un partecipante dal registro
-    case 4: return wiz.presetOk;                     // preset reale selezionato
+    case 1: return wiz.typeOk && wiz.modeOk;         // tipo (obbligatorio) + modalità
+    case 2: return participantsList().length >= 1;   // almeno un soggetto nel registro
+    case 3: return wiz.presetOk;                     // preset reale selezionato
     default: return true;
   }
 }
@@ -510,18 +513,12 @@ function fillPresetPickers() {
   document.getElementById('live-preset').innerHTML = opt;
   const sopt = '<option value="">— soggetto —</option>'+subjectLabels().map(l=>`<option value="${l}">${l}</option>`).join('');
   document.getElementById('live-subject').innerHTML = sopt;
-  // Step 1a: lista preset informativa
-  const wl = document.getElementById('wiz-preset-list');
-  if (wl) wl.innerHTML = presets.length
-    ? presets.map(p=>`<div class="bg-gray-950 rounded px-2 py-1">${esc(p.name)} <span class="text-gray-600">· ${esc(presetSummary(p))}</span></div>`).join('')
-    : '<div class="text-amber-500">Nessun preset: creane uno in ⚙ Configurazione prima di proseguire.</div>';
-  // Step 4: default = ultimo preset usato
+  // Step 3: default = ultimo preset usato
   const last = localStorage.getItem('faceid_last_preset');
   if (last && presets.some(p=>p.preset_id===last)) { document.getElementById('preset-pick').value = last; onPresetPick(); }
-  renderWizSubjects();
 }
-// ── Step 3: soggetti dal registro con NOMI COMPLETI (stato in wiz.subjects, spunte stabili) ──
-function subjectsFullList(){
+// ── Partecipanti = TUTTO il registro (iscritti S + sconosciuti U), sempre col NOME COMPLETO ──
+function participantsList(){
   const en = (subjects.enrolled||[]).map(e=>{
     const p = (persons||[]).find(x=>x.id===e.person_id);
     return { label:e.label, person_id:e.person_id, name: p ? p.name : '(persona non mappata)' };
@@ -529,27 +526,15 @@ function subjectsFullList(){
   const un = (subjects.unknown||[]).map(u=>({ label:u.label, person_id:null, name:'Sconosciuto' }));
   return en.concat(un);
 }
-function toggleSubject(label){
-  const i = wiz.subjects.indexOf(label);
-  if (i>=0) wiz.subjects.splice(i,1); else wiz.subjects.push(label);
-  renderWizSubjects(); updateNext();
-}
-function renderWizSubjects(){
-  const box = document.getElementById('wiz-subjects');
-  if (!box) return;
-  const list = subjectsFullList();
-  box.innerHTML = list.length ? list.map(s=>`
-    <label class="flex items-center gap-2 bg-gray-950 rounded-lg px-3 py-2 cursor-pointer text-sm">
-      <input type="checkbox" class="accent-emerald-500" ${wiz.subjects.indexOf(s.label)>=0?'checked':''}
-             onchange="toggleSubject('${esc(s.label)}')" />
-      <span class="font-mono text-emerald-400">${esc(s.label)}</span>
-      <span class="font-medium">— ${esc(s.name)}</span>
-      ${s.person_id!=null?`<span class="text-[11px] text-gray-600">(#${s.person_id})</span>`:''}
-    </label>`).join('')
-    : '<div class="text-[11px] text-amber-500">Registro vuoto: configura i soggetti in ⚙ Configurazione.</div>';
-  const picked = subjectsFullList().filter(s=>wiz.subjects.indexOf(s.label)>=0);
-  document.getElementById('wiz-subjects-picked').textContent =
-    picked.length ? ('Selezionati: ' + picked.map(s=>s.label+' — '+s.name).join(', ')) : 'Nessun partecipante selezionato.';
+function refreshParticipants(){
+  const box = document.getElementById('wiz-participants');
+  if (box){
+    const list = participantsList();
+    box.innerHTML = list.length
+      ? 'Partecipanti: ' + list.map(s=>`<b>${esc(s.label)} — ${esc(s.name)}${s.person_id!=null?' (#'+s.person_id+')':''}</b>`).join(', ')
+      : '<span class="text-amber-500">Aggiungi almeno un soggetto (iscritto o sconosciuto).</span>';
+  }
+  updateNext();
 }
 function detectDrives() {
   fetch('/api/storage/drives').then(r=>r.json()).then(ds=>{
@@ -579,6 +564,8 @@ function pickType(t) {
   document.getElementById('type-crossing').classList.toggle('ring-emerald-400', t==='crossing');
   document.getElementById('type-common').classList.toggle('ring-2', t==='common');
   document.getElementById('type-common').classList.toggle('ring-emerald-400', t==='common');
+  const lbl = document.getElementById('wiz-type-label');
+  if (lbl) lbl.textContent = t==='common' ? '· Gruppo (statici)' : '· Singola (attraversamenti)';
   updateNext();
 }
 function stepEls(){ return [...document.querySelectorAll('.wiz-step')]; }
@@ -586,7 +573,8 @@ function showStep() {
   stepEls().forEach(el=>el.classList.toggle('hidden', +el.dataset.step !== wiz.step));
   document.getElementById('wiz-back').disabled = wiz.step===1;
   document.getElementById('wiz-next').classList.toggle('hidden', wiz.step===wiz.maxStep);
-  document.getElementById('step-dots').innerHTML = [1,2,3,4,5].map(s=>`<span class="step-dot ${s===wiz.step?'on':''}"></span>`).join('');
+  document.getElementById('step-dots').innerHTML = [1,2,3,4].map(s=>`<span class="step-dot ${s===wiz.step?'on':''}"></span>`).join('');
+  if (wiz.step===2) refreshParticipants();          // registro visibile → aggiorna riepilogo partecipanti
   if (wiz.step===wiz.maxStep) renderWizSummary();
   updateNext();
 }
@@ -596,18 +584,17 @@ function wizNav(dir) {
   showStep();
 }
 function wizSubjectsPayload(){
-  return subjectsFullList().filter(s=>wiz.subjects.indexOf(s.label)>=0)
-    .map(s=>({label:s.label, person_id:s.person_id}));
+  return participantsList().map(s=>({label:s.label, person_id:s.person_id}));
 }
 function renderWizSummary() {
   const p = presets.find(x=>x.preset_id===(wiz.presetId||document.getElementById('preset-pick').value));
-  const picked = subjectsFullList().filter(s=>wiz.subjects.indexOf(s.label)>=0);
+  const picked = participantsList();
   document.getElementById('wiz-summary').innerHTML = `
     <div><span class="text-gray-500">Partecipanti:</span> <b>${picked.map(s=>esc(s.label)+' — '+esc(s.name)+(s.person_id!=null?' (#'+s.person_id+')':'')).join(', ')||'—'}</b></div>
-    <div><span class="text-gray-500">Tipo:</span> ${wiz.sessionType==='common'?'Gruppo (statici)':'Singolo (attraversamenti)'}</div>
+    <div><span class="text-gray-500">Tipo:</span> ${wiz.sessionType==='common'?'Gruppo (statici)':'Singola (attraversamenti)'}</div>
     <div><span class="text-gray-500">Modalità:</span> ${wiz.recordVideo ? '🎥 registrazione video' : '<b class="text-emerald-400">🗺 mappatura — nessuna immagine su disco</b>'}</div>
     <div><span class="text-gray-500">Condizione:</span> ${p?esc(p.name)+' <span class="text-gray-600">· '+esc(presetSummary(p))+'</span>':'—'}</div>
-    <div><span class="text-gray-500">Destinazione:</span> ${wiz.destination ? esc(wiz.destination) : 'interno (default)'}</div>
+    <div><span class="text-gray-500">Destinazione:</span> ${wiz.destOk ? (wiz.destination ? esc(wiz.destination) : 'interno (default)') : '<b class="text-amber-400">⚠ non validata — vai in ⚙ Configurazione</b>'}</div>
     <div><span class="text-gray-500">Profilo attivo:</span> <span id="wiz-prof-state">…</span></div>`;
   // profilo con stato semaforo (verificato = pack caricato)
   fetch('/api/settings/profile/status').then(r=>r.json()).then(s=>{
@@ -626,8 +613,10 @@ function renderWizSummary() {
     .catch(()=>{ document.getElementById('wiz-genname').textContent = '(anteprima non disponibile)'; });
 }
 function startRecording() {
+  if (!wiz.destOk) { alert('Seleziona e valida una destinazione in ⚙ Configurazione esperimento prima di avviare.'); return; }
   wiz.presetId = document.getElementById('preset-pick').value;
   const subjectsSel = wizSubjectsPayload();
+  if (!subjectsSel.length) { alert('Aggiungi almeno un soggetto al registro (step 2).'); return; }
   const body = {
     subjects: subjectsSel,
     preset_id: wiz.presetId || null,
@@ -713,9 +702,9 @@ function applyRun() {
 function stopSession() {
   fetch('/api/validation/stop', {method:'POST'}).then(r=>r.json()).then(()=>{
     pollStatus(); refreshSessions(); loadArchive();
-    // Nuova sessione: riparti dallo Step 2 con le selezioni precedenti prefillate
-    // (destinazione/preset/soggetti restano nello stato wiz + localStorage).
-    wiz.step = 2; showStep();
+    // Nuova sessione: riparti dallo Step 1 (tipo) con le selezioni precedenti preservate
+    // (destinazione in Config, preset/registro nello stato + localStorage).
+    wiz.step = 1; showStep();
   });
 }
 
@@ -859,6 +848,12 @@ function openArchiveSession(sid){
 // ── init ──
 document.getElementById('wiz-day').textContent =
   '→ cartella del giorno: ' + new Date().toISOString().slice(0,10).replace(/-/g,'');
+// Sposta la Revisione verità a terra dentro il toggle (chiuso) di Configurazione esperimento,
+// così non disturba il flusso nuova sessione e non parte per sbaglio.
+(function relocateGtReview(){
+  const host = document.getElementById('gt-review-host'), sec = document.getElementById('gt-review-section');
+  if (host && sec) host.appendChild(sec);
+})();
 (function prefillDest(){
   const last = localStorage.getItem('faceid_last_dest');
   if (last) { document.getElementById('dest-path').value = last; validateDest(); }
