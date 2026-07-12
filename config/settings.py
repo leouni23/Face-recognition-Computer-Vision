@@ -1,4 +1,6 @@
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import List
 
 try:  # pydantic v2 (x86): pydantic-settings is a separate package
@@ -7,6 +9,32 @@ try:  # pydantic v2 (x86): pydantic-settings is a separate package
 except ImportError:  # pydantic v1 (Jetson / Python 3.6 backport): BaseSettings is built in
     from pydantic import BaseSettings
     _PYDANTIC_V2 = False
+
+
+def _load_runtime_env() -> None:
+    """Load runtime overrides persisted by the UI (profile switch, threshold) from
+    ${DATA_DIR}/runtime.env INTO os.environ, so Settings() picks them up as normal env vars.
+
+    Critical: the boot must NEVER depend on a file written at runtime. This is best-effort — if
+    python-dotenv is missing OR the file is absent/unreadable, we skip silently and the app boots
+    from the compose environment. (Previously _persist_env wrote /app/.env which pydantic re-read
+    at boot, hard-requiring python-dotenv → ModuleNotFoundError crash-loop after any UI switch.)
+    """
+    path = Path(os.environ.get("DATA_DIR", "data")) / "runtime.env"
+    try:
+        if not path.is_file():
+            return
+        from dotenv import dotenv_values  # optional dep; absence must not break boot
+        for key, value in (dotenv_values(str(path)) or {}).items():
+            if value is not None:
+                os.environ[key] = value  # persisted user choice overrides the compose default
+    except ImportError:
+        pass  # python-dotenv not installed → ignore runtime overrides, boot from env
+    except OSError:
+        pass
+
+
+_load_runtime_env()
 
 
 class Settings(BaseSettings):

@@ -769,8 +769,12 @@ def storage_validate():
 
 
 def _persist_env(key: str, value: str) -> bool:
-    """Best-effort: update/insert KEY=value in the project .env so the change survives restart."""
-    env_path = Path(__file__).parent.parent / ".env"
+    """Best-effort: update/insert KEY=value in ${DATA_DIR}/runtime.env (on the external disk) so
+    the change survives a restart. Deliberately NOT /app/.env: pydantic re-reads .env at boot,
+    which hard-requires python-dotenv and crash-looped the container after a UI switch. runtime.env
+    is loaded into os.environ by config.settings._load_runtime_env, best-effort — the boot never
+    depends on it."""
+    env_path = Path(os.environ.get("DATA_DIR", "data")) / "runtime.env"
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
         out, found = [], False
