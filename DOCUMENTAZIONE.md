@@ -689,6 +689,44 @@ degradazione elegante su x86/nodi assenti. I nodi sono bind-montati **read-only*
 Il pannello live `/api/metrics` espone anche `sysfs{}` quando disponibile. Su board diverse dal TX2
 i canali assenti vengono semplicemente omessi (log una-tantum).
 
+### 11.8 Persistenza runtime, telemetria robusta e layout validazione
+
+- **Boot disaccoppiato dai file scritti a runtime:** la UI persiste i cambi (profilo, soglia) in
+  `${DATA_DIR}/runtime.env` sul disco esterno (non più `/app/.env`). `config.settings` lo carica in
+  `os.environ` all'avvio in modo **best-effort**: se manca `python-dotenv` o il file, l'app parte
+  comunque dalle env del compose. `python-dotenv==0.20.0` è ora in `requirements-jetson.txt`
+  (pydantic v1 lo richiede per leggere `.env`): la sua assenza causava un crash-loop
+  `ModuleNotFoundError: dotenv` a ogni restart dopo uno switch profilo.
+- **Costo telemetria:** TTL cache sysfs default **100 ms** (`SYSFS_TTL_MS` per override); a 30 fps
+  le letture I2C reali dei rail INA scendono a ~10/s. `telemetry_sampling_cost_us` in `session.json`
+  è ora la **mediana a regime** (esclusa la prima lettura a freddo), non più la chiamata cold.
+- **Energia con tracker:** con un volto persistente il tracker salta il re-embed (`emb_ms=0`) →
+  nessun campione per-identificazione. `energy_per_id` lo dichiara esplicitamente
+  (`{"n":0,"note":"no re-embed (tracker hit)"}` vs `{"note":"misura non disponibile"}`) e c'è sempre
+  `energy_per_frame` (∫VDD_IN su tutti i frame processati).
+- **Etichetta piattaforma:** `docker-compose.jetson.yml` monta `/proc/device-tree/model:ro` →
+  `detect_platform_label()` produce `jetson-tx2-trt` (non più `arm64-trt`). Se il nodo resta
+  illeggibile, log del motivo + fallback all'arch.
+- **EMC:** su questa build L4T non esiste un `devfreq` EMC → `emc_util_pct`/`freq_mhz.emc` sono
+  **omessi** (degradazione elegante). Il sampler prova anche `devfreq`, poi debugfs
+  (`/sys/kernel/debug/clk/emc/clk_rate`) e `actmon`; se nessuno è montato, il campo resta assente
+  senza errori.
+- **Switch profilo rapidi:** un token di epoch impedisce a un warm-up del profilo precedente, che
+  termina in ritardo, di sovrascrivere l'analyzer del profilo nuovo (build obsoleta scartata).
+
+**Layout `/validation` (riorganizzato):**
+- **⚙ Configurazione esperimento** (in alto, sempre): SOLO **preset di condizione** (sx) +
+  **memoria di destinazione obbligatoria** (dx). Il registro soggetti NON è più qui. In coda, un
+  toggle **Revisione verità a terra** chiuso di default (etichettatura a posteriori dei video —
+  separata dal flusso, non parte per sbaglio).
+- **▶ Nuova sessione** (4 step): 1) **tipo** Singola/Gruppo (obbligatorio) + **modalità**
+  mappatura/video; 2) **registro soggetti CRUD inline** (compare dopo il tipo): iscritti S→persona
+  col **nome completo sempre visibile**, sconosciuti U, `Salva registro` — i soggetti salvati sono i
+  partecipanti; 3) **preset** (default ultimo usato); 4) **riepilogo + nome auto-generato**
+  `YYYYMMDD_HHMMSS_<NomiCompleti>_<preset>_<profilo>_provaN` con profilo/semaforo; `● Avvia`
+  (bloccato senza destinazione validata o senza partecipanti). Back a ogni step; dopo lo stop
+  riparte dallo step 1. Cartella giornaliera `validation/<YYYYMMDD>/` invariata.
+
 ---
 
 ## 12. Bot Telegram
