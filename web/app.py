@@ -93,7 +93,7 @@ def index():
 
 # ── MJPEG stream ──────────────────────────────────────────────────────────────
 
-@app.route("/stream/<camera_id>")
+@app.route("/stream/<path:camera_id>")
 def video_stream(camera_id: str):
     def generate():
         broadcaster.add_viewer(camera_id)
@@ -256,7 +256,7 @@ def add_camera():
     return jsonify(res), 201
 
 
-@app.route("/api/cameras/<camera_id>", methods=["PATCH", "PUT"])
+@app.route("/api/cameras/<path:camera_id>", methods=["PATCH", "PUT"])
 def edit_camera(camera_id: str):
     data = request.get_json(silent=True) or {}
     fields = {k: data[k] for k in ("name", "source", "enabled", "resolution") if k in data}
@@ -269,14 +269,14 @@ def edit_camera(camera_id: str):
     return jsonify({"ok": True})
 
 
-@app.route("/api/cameras/<camera_id>", methods=["DELETE"])
+@app.route("/api/cameras/<path:camera_id>", methods=["DELETE"])
 def delete_camera(camera_id: str):
     if not camera_manager.remove(camera_id):
         return jsonify({"error": "Camera non trovata"}), 404
     return jsonify({"ok": True})
 
 
-@app.route("/api/cameras/<camera_id>/test", methods=["POST"])
+@app.route("/api/cameras/<path:camera_id>/test", methods=["POST"])
 def test_camera(camera_id: str):
     """Probe a source (the posted one, or the registered camera's) and return ok + a snapshot."""
     data = request.get_json(silent=True) or {}
@@ -1029,7 +1029,7 @@ def upload_map():
     return jsonify({"exists": True, "url": f"/static/maps/{dest.name}"})
 
 
-@app.route("/api/cameras/<camera_id>/snapshot")
+@app.route("/api/cameras/<path:camera_id>/snapshot")
 def camera_snapshot(camera_id: str):
     frame = broadcaster.get_raw_frame(camera_id)
     if frame is None:
