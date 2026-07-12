@@ -51,6 +51,10 @@ services:
       - /sys/devices/system/cpu:/sys/devices/system/cpu:ro                  # CPU frequencies
       - /sys/class/devfreq:/sys/class/devfreq:ro                            # GPU / EMC frequencies
       - /sys/kernel/actmon_avg_activity:/sys/kernel/actmon_avg_activity:ro  # EMC utilization (optional)
+      # Board model for the platform label (jetson-tx2 vs arm64): /proc/device-tree isn't visible
+      # in the container by default. Mount the model node read-only. If absent on another board the
+      # mount fails → fall back to mounting the whole /proc/device-tree:ro.
+      - /proc/device-tree/model:/proc/device-tree/model:ro
     entrypoint: ["python3", "main.py", "--web", "--host", "0.0.0.0"]
     devices:
       - "/dev/video1:/dev/video0"          # USB UVC camera (Logitech); CSI /dev/video0 needs nvargus-daemon (unavailable in container)

@@ -292,11 +292,21 @@ def _slug_gpu(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s) or "gpu"
 
 
+_jetson_model_warned = False
+
+
 def _jetson_model() -> Optional[str]:
-    """Read the Jetson board name from the device tree → jetson-tx2 / jetson-orin / …"""
+    """Read the Jetson board name from the device tree → jetson-tx2 / jetson-orin / …
+    Inside the container /proc/device-tree must be bind-mounted (docker-compose.jetson.yml);
+    if it's unreadable we log the reason ONCE and fall back to the arch label."""
+    global _jetson_model_warned
     try:
         txt = Path("/proc/device-tree/model").read_text(errors="ignore").lower()
-    except Exception:
+    except Exception as exc:
+        if not _jetson_model_warned and Path("/etc/nv_tegra_release").exists():
+            _jetson_model_warned = True
+            logger.info("Platform: /proc/device-tree/model illeggibile ({}); montalo read-only nel "
+                        "compose per l'etichetta jetson-* — fallback su arch".format(exc))
         return None
     for key in ("tx2", "orin", "xavier", "nano", "tx1"):
         if key in txt:
