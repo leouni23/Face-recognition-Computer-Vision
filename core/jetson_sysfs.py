@@ -14,11 +14,22 @@ raises, and the missing nodes are logged once.
 import glob
 import os
 import time
-from typing import Dict, List, Optional, Tuple
+from collections import deque
+from typing import Deque, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-_TTL_S = 0.02  # 20 ms: reads closer than this reuse the last sample
+def _ttl_s() -> float:
+    """Cache TTL in seconds. Default 100 ms (power/temp change slowly; at 30 fps this caps real
+    I2C reads at ~10/s so the ~ms-scale INA rail reads stay negligible on the inference path).
+    Override with SYSFS_TTL_MS."""
+    try:
+        return max(0.0, float(os.environ.get("SYSFS_TTL_MS", "100"))) / 1000.0
+    except (TypeError, ValueError):
+        return 0.1
+
+
+_TTL_S = _ttl_s()
 
 
 def _read(path: str) -> Optional[str]:
@@ -55,7 +66,8 @@ class SysfsTelemetry:
         self._emc_freq_max: Optional[int] = None
         self._cache: Dict = {}
         self._cache_ts = 0.0
-        self._cost_us: Optional[float] = None
+        self._cost_hist: Deque[float] = deque(maxlen=64)  # steady-state read costs (µs)
+        self._cost_first_skipped = False                  # drop the cold first read
         self._missing_logged = False
         self.available = False
 
@@ -108,6 +120,13 @@ class SysfsTelemetry:
             self._emc_freq = emc[0]
             mx = glob.glob(os.path.join(os.path.dirname(emc[0]), "max_freq"))
             self._emc_freq_max = _read_int(mx[0]) if mx else None
+        else:
+            # No devfreq EMC node on this L4T build → try debugfs (only if mounted). If neither is
+            # present the EMC channel is simply omitted (graceful — documented in DOCUMENTAZIONE).
+            for cand in ("/sys/kernel/debug/clk/emc/clk_rate", "/sys/kernel/debug/bpmp/debug/clk/emc/rate"):
+                if os.path.exists(cand):
+                    self._emc_freq = cand
+                    break
 
         # EMC utilization via actmon (optional)
         for cand in ("/sys/kernel/actmon_avg_activity/mc_all",):
@@ -152,7 +171,8 @@ class SysfsTelemetry:
     # ── sampling (hot path, TTL-cached) ───────────────────────────────────────
 
     def sample(self) -> Dict:
-        """Flat hardware snapshot. TTL-cached (20 ms). Never raises. {} when nothing available."""
+        """Flat hardware snapshot. TTL-cached (default 100 ms). Never raises. {} when nothing
+        available. Real (cache-miss) read costs feed a steady-state history for probe_cost_us."""
         if not self._discovered:
             self._discover()
         now = time.monotonic()
@@ -161,10 +181,15 @@ class SysfsTelemetry:
         t0 = time.perf_counter()
         out = self._read_all()
         cost_us = (time.perf_counter() - t0) * 1e6
-        if self._cost_us is None and out:
-            self._cost_us = cost_us
-            logger.info("SysfsTelemetry: campione in {:.1f} µs, {} canali".format(
-                cost_us, self._channel_count(out)))
+        if out:
+            if not self._cost_first_skipped:
+                # First real read is cold (discovery page-cache miss, ~100s of ms): don't let it
+                # poison the persisted cost — record the reference but exclude it from the median.
+                self._cost_first_skipped = True
+                logger.info("SysfsTelemetry: primo campione (cold) in {:.1f} µs, {} canali".format(
+                    cost_us, self._channel_count(out)))
+            else:
+                self._cost_hist.append(cost_us)
         self._cache = out
         self._cache_ts = now
         return out
@@ -224,8 +249,12 @@ class SysfsTelemetry:
         return n
 
     def probe_cost_us(self) -> Optional[float]:
-        """Measured cost of one real sample() (transparency on telemetry overhead)."""
-        return round(self._cost_us, 1) if self._cost_us is not None else None
+        """STEADY-STATE median cost of a real (cache-miss) sample() in µs — the cold first read is
+        excluded, so this reflects the true recurring overhead, not the one-off discovery hit."""
+        if not self._cost_hist:
+            return None
+        vs = sorted(self._cost_hist)
+        return round(vs[len(vs) // 2], 1)
 
 
 sysfs_telemetry = SysfsTelemetry()

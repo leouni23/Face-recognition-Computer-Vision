@@ -482,7 +482,8 @@ class ValidationManager:
             self._write_ms: List[float] = []   # JSONL append latencies (Tier-A disk telemetry)
             self._io0 = _proc_io()             # /proc/self/io baseline → delta at stop
             self._hw_samples: List[dict] = []  # per-embedding sysfs hw snapshots (aggregated at stop)
-            self._energy: List[float] = []     # per-record VDD_IN·emb_ms (µJ) for energy/identification
+            self._energy: List[float] = []     # per-record VDD_IN·emb_ms (µJ) — only on real re-embed
+            self._energy_frame: List[float] = []  # per-frame VDD_IN·t_total (µJ) — every processed frame
             self._sinks = {}
             self._frames = {}
             self._last_frame = {}
@@ -759,12 +760,28 @@ class ValidationManager:
                 }
             self._meta["hw_aggregate"] = agg
             self._meta["throttling_frac"] = round(throttled / len(samples), 3)
+        # Energy per identification (∫VDD_IN over embed time). With the tracker, a persistent face
+        # skips re-embedding (emb_ms=0) → no energy sample: report that EXPLICITLY, never a bare
+        # None that reads as a failed measurement.
         energy = getattr(self, "_energy", None) or []
+        frame_energy = getattr(self, "_energy_frame", None) or []
         if energy:
             self._meta["energy_per_id"] = {
                 "n": len(energy),
                 "total_uj": round(sum(energy), 1),
                 "mean_uj": round(sum(energy) / len(energy), 1),
+            }
+        elif frame_energy:
+            self._meta["energy_per_id"] = {"n": 0, "note": "no re-embed nel periodo (tracker hit)"}
+        else:
+            self._meta["energy_per_id"] = {"note": "misura non disponibile (VDD_IN assente)"}
+        # Per-frame mean energy (∫VDD_IN over every processed frame) — always available whenever
+        # power was sampled, so the metric is non-empty even under full tracking.
+        if frame_energy:
+            self._meta["energy_per_frame"] = {
+                "n": len(frame_energy),
+                "total_uj": round(sum(frame_energy), 1),
+                "mean_uj": round(sum(frame_energy) / len(frame_energy), 1),
             }
         try:
             from core.jetson_sysfs import sysfs_telemetry
@@ -850,9 +867,16 @@ class ValidationManager:
                 hw = stages["hw"]
                 self._hw_samples.append(hw)
                 vdd = (hw.get("power_mw") or {}).get("VDD_IN")
-                emb_ms = (stages.get("t_ms") or {}).get("emb")
-                if vdd is not None and emb_ms:
-                    self._energy.append(float(vdd) * float(emb_ms))
+                t_ms = stages.get("t_ms") or {}
+                emb_ms = t_ms.get("emb")
+                if vdd is not None:
+                    # per-identification energy only when a real re-embed happened this frame
+                    if emb_ms:
+                        self._energy.append(float(vdd) * float(emb_ms))
+                    # per-frame energy always (works under full tracking too)
+                    total_ms = t_ms.get("total")
+                    if total_ms:
+                        self._energy_frame.append(float(vdd) * float(total_ms))
             # Latest boxes for live click-to-assign — metadata only, never an image on disk.
             self._last_frame[camera_id] = {
                 "frame_index": frame_index, "ts_ms": ts_ms, "faces": faces_live,
