@@ -336,7 +336,9 @@ class FaceIdPipeline:
         t_pre = time.perf_counter()
         work, scale = self._downsample(frame, prof.det_size)
         pre_ms = (time.perf_counter() - t_pre) * 1000.0
-        pairs = detect_faces(work, timing=timing)  # [(loc_ds, face)]
+        # Pass `scale` so the min_face_px cut is measured in ORIGINAL-frame pixels (same semantics
+        # as the Standard path); otherwise the downsample silently over-filters normal-size faces.
+        pairs = detect_faces(work, scale=scale, timing=timing)  # [(loc_ds, face)]
         if not pairs:
             self._last_results[camera_id] = []
             if notify_unknown:

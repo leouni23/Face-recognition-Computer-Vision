@@ -532,9 +532,16 @@ def detect_and_encode(
 # Standard keeps detect_and_encode (above) byte-for-byte. The optimized pipeline detects boxes
 # every frame but only embeds faces that the tracker can't carry over — and can batch them.
 
-def detect_faces(frame: np.ndarray, timing: Optional[Dict[str, float]] = None):
+def detect_faces(frame: np.ndarray, scale: float = 1.0,
+                 timing: Optional[Dict[str, float]] = None):
     """Detect faces and return [(location, face)] WITHOUT computing embeddings. `face` is the
-    InsightFace Face (bbox + kps), passed later to `embed_faces`. Filtered by `min_face_px`."""
+    InsightFace Face (bbox + kps), passed later to `embed_faces`. Filtered by `min_face_px`.
+
+    `frame` may be a DOWNSAMPLED work frame (optimized profile) whose coordinates are `scale` ×
+    the original. The `min_face_px` cut must be measured in ORIGINAL-frame pixels — exactly like
+    the Standard path (`_faces_to_data`) — otherwise the downsample makes the filter ~1/scale ×
+    stricter and silently drops normally-sized faces (a subject at moderate distance yields no
+    detections at all → the optimized profile appears dead: no ID, no 'unknown')."""
     from insightface.app.common import Face
 
     analyzer = _get_analyzer()
@@ -544,9 +551,10 @@ def detect_faces(frame: np.ndarray, timing: Optional[Dict[str, float]] = None):
     if timing is not None:
         timing["detect_ms"] = (time.perf_counter() - t0) * 1000.0
     out = []
+    scale = scale if scale > 0 else 1.0
     for i in range(bboxes.shape[0]):
         x1, y1, x2, y2 = bboxes[i, 0:4].astype(int)
-        if (y2 - y1) < min_px:
+        if (y2 - y1) / scale < min_px:  # original-frame height (frame may be downsampled)
             continue
         kps = kpss[i] if kpss is not None else None
         face = Face(bbox=bboxes[i, 0:4], kps=kps, det_score=bboxes[i, 4])
