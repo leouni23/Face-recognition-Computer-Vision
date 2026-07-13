@@ -72,7 +72,9 @@
     <span id="cam-sources" class="text-gray-600"></span>
   </div>
   <script>
+    let currentProfile = null;   // ultimo profilo attivo noto (per la conferma di cambio)
     function renderProfile(p){
+      currentProfile = p.profile;
       const on='bg-emerald-600 text-white', off='bg-gray-800 hover:bg-gray-700';
       ['standard','optimized-tx2'].forEach(k=>{
         const b=document.getElementById('prof-'+k); if(!b) return;
@@ -91,8 +93,11 @@
     }
     function loadProfile(){ fetch('/api/settings/profile').then(r=>r.json()).then(renderProfile).catch(()=>{}); }
     function setProfile(v){
+      if (v === currentProfile) return;   // già attivo → nessun rebuild inutile
+      const label = v==='optimized-tx2' ? 'Optimized-TX2 (buffalo_s · TensorRT/FP16)' : 'Standard (buffalo_l · FP32)';
+      if (!confirm(`Passare al profilo ${label}?\n\nVerranno ricaricati i modelli: il riconoscimento si ferma per alcuni minuti (fino a ~9 min sul TX2) durante il caricamento. La barra di avanzamento in alto mostrerà il progresso.`)) return;
       fetch('/api/settings/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:v})})
-        .then(r=>r.json()).then(p=>{ if(p.error){alert(p.error);return;} renderProfile(p); });
+        .then(r=>r.json()).then(p=>{ if(p.error){alert(p.error);return;} renderProfile(p); pollWarmup(); pollProfileStatus(); });
     }
     const CAM_STATUS_COLOR = {connected:'#10b981', connecting:'#f59e0b', error:'#ef4444', stopped:'#6b7280', disabled:'#374151'};
     function STATUS_DOT(s){ return `<span style="display:inline-block;width:.5rem;height:.5rem;border-radius:9999px;background:${CAM_STATUS_COLOR[s]||'#6b7280'}"></span>`; }
@@ -128,7 +133,10 @@
     function pollWarmup(){
       fetch('/api/warmup').then(r=>r.json()).then(w=>{
         const bar=document.getElementById('warmup-bar');
-        if (w.active && !w.ready){
+        // Mostra la barra durante OGNI build/rebuild (w.active). Al cambio profilo il vecchio
+        // analyzer resta attivo → w.ready=True, quindi NON si può gattare su !w.ready (altrimenti
+        // la barra apparirebbe solo al primo boot e mai al cambio profilo).
+        if (w.active){
           bar.classList.remove('hidden');
           document.getElementById('warmup-label').textContent = (w.phase||'Caricamento modelli')+'…';
           const pct = Math.max(0, Math.min(100, w.pct||0));
