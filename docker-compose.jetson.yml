@@ -59,5 +59,11 @@ services:
       - /sys/firmware/devicetree/base/compatible:/run/board-compatible:ro
     entrypoint: ["python3", "main.py", "--web", "--host", "0.0.0.0"]
     devices:
-      - "/dev/video1:/dev/video0"          # USB UVC camera (Logitech); CSI /dev/video0 needs nvargus-daemon (unavailable in container)
+      # USB UVC camera mapped to /dev/video0 inside the container. The HOST path is NOT hardcoded:
+      # a USB cam can enumerate as video0/video1/… and hardcoding it made the container refuse to
+      # start ("no such file or directory") whenever it moved or was unplugged. deploy-jetson.sh
+      # auto-detects it and exports CAMERA_DEVICE; the /dev/null default keeps the container
+      # startable with no camera attached (RTSP sources need no device at all).
+      # CSI /dev/video0 needs nvargus-daemon, unavailable in the container.
+      - "${CAMERA_DEVICE:-/dev/null}:/dev/video0"
 

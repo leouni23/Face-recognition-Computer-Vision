@@ -40,6 +40,23 @@ mkdir -p "$EXT_DISK/models" "$EXT_DISK/engines" "$EXT_DISK/validation" 2>/dev/nu
   || sudo mkdir -p "$EXT_DISK/models" "$EXT_DISK/engines" "$EXT_DISK/validation"
 [ -w "$EXT_DISK/models" ] || sudo chmod -R a+rwX "$EXT_DISK/models" "$EXT_DISK/engines" "$EXT_DISK/validation" || true
 
+# USB camera: the host device node is NOT fixed (video0/video1/... depending on enumeration), and
+# a missing node makes `compose up` fail outright. Auto-detect the first V4L2 capture node that is
+# NOT the CSI one (/dev/video0 on Tegra needs nvargus-daemon, unavailable in the container); fall
+# back to /dev/null so the container always starts (RTSP sources need no device).
+if [ -z "${CAMERA_DEVICE:-}" ]; then
+  CAMERA_DEVICE=/dev/null
+  for d in /dev/video1 /dev/video2 /dev/video3 /dev/video0; do
+    if [ -e "$d" ]; then CAMERA_DEVICE="$d"; break; fi
+  done
+fi
+export CAMERA_DEVICE
+# Persist it in the env-file too: `sudo -E` doesn't propagate the variable under every sudoers
+# config, and compose reads the env-file regardless.
+grep -q '^CAMERA_DEVICE=' "$ENV_FILE" && sed -i "s#^CAMERA_DEVICE=.*#CAMERA_DEVICE=${CAMERA_DEVICE}#" "$ENV_FILE" \
+  || echo "CAMERA_DEVICE=${CAMERA_DEVICE}" >> "$ENV_FILE"
+echo "Camera USB: ${CAMERA_DEVICE}$([ "$CAMERA_DEVICE" = /dev/null ] && echo '  (nessuna rilevata: usa sorgenti RTSP/IP)')"
+
 # Max performance (best-effort; ignore if not a Jetson / no sudo).
 sudo nvpmodel -m 0 >/dev/null 2>&1 || true
 sudo jetson_clocks  >/dev/null 2>&1 || true
