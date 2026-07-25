@@ -76,24 +76,149 @@ def make_trial_key(subject_labels: List[str], preset_id: Optional[str], profile:
     return "|".join(sorted(subject_labels)) + "|" + (preset_id or "none") + "|" + profile
 
 
-def count_trials(trial_key: str) -> int:
-    """How many existing sessions (whole validation/ tree, any layout) share `trial_key`.
-    Global counter per decision — provaN never repeats across days."""
-    root = validation_root()
+def count_trials(trial_key: str, scope: Optional[Path] = None) -> int:
+    """How many existing sessions share `trial_key`, counted INSIDE `scope` (the active campaign
+    by default). Scoping it to the campaign is the point: a fresh campaign restarts provaN at 1,
+    so repeating the same subject/preset/profile in a new experiment isn't labelled prova7."""
+    if scope is None:
+        camp = active_campaign()
+        scope = Path(camp["dir"]) if camp else None
     n = 0
-    if not root.is_dir():
+    if scope is None or not Path(scope).is_dir():
         return 0
-    for d in root.iterdir():
-        candidates = [d] if (d / "session.json").is_file() else \
-                     ([s for s in d.iterdir() if (s / "session.json").is_file()] if d.is_dir() else [])
-        for s in candidates:
-            try:
-                meta = json.loads((s / "session.json").read_text(encoding="utf-8"))
-                if meta.get("trial_key") == trial_key:
-                    n += 1
-            except Exception:
-                pass
+    for s in Path(scope).iterdir():
+        if not (s / "session.json").is_file():
+            continue
+        try:
+            meta = json.loads((s / "session.json").read_text(encoding="utf-8"))
+            if meta.get("trial_key") == trial_key:
+                n += 1
+        except Exception:
+            pass
     return n
+
+
+# ── Validation campaigns ──────────────────────────────────────────────────────────
+# A campaign is the experiment container: validation/<YYYYMMDD>_<slug>/ holding a campaign.json
+# and the sessions (session layout unchanged — only the parent differs). The active campaign is
+# recorded in a marker file inside the validation root, read ON DEMAND (never at boot: the boot
+# must not depend on a runtime-written file — see the dotenv incident) and travelling with the
+# data disk. If none is active when a session starts, a daily one is created automatically, so a
+# session is never "loose".
+
+_ACTIVE_MARKER = ".active_campaign.json"
+
+
+def _marker_path() -> Path:
+    return validation_root() / _ACTIVE_MARKER
+
+
+def _campaign_info(d: Path) -> dict:
+    """Campaign summary from its folder (manifest + session count)."""
+    meta = {}
+    try:
+        meta = json.loads((d / "campaign.json").read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    n = 0
+    try:
+        n = sum(1 for s in d.iterdir() if (s / "session.json").is_file())
+    except OSError:
+        pass
+    return {
+        "folder": d.name, "dir": str(d),
+        "campaign_id": meta.get("campaign_id", d.name),
+        "name": meta.get("name", d.name),
+        "created_at": meta.get("created_at"), "closed_at": meta.get("closed_at"),
+        "notes": meta.get("notes", ""), "is_test": bool(meta.get("is_test")),
+        "auto": bool(meta.get("auto")), "n_sessions": n,
+    }
+
+
+def active_campaign() -> Optional[dict]:
+    """The open campaign, or None. A stale marker (folder deleted) reads as None, never raises."""
+    try:
+        raw = json.loads(_marker_path().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    folder = (raw or {}).get("folder")
+    if not folder:
+        return None
+    d = validation_root() / folder
+    if not (d.is_dir() and (d / "campaign.json").is_file()):
+        return None
+    info = _campaign_info(d)
+    return None if info.get("closed_at") else info
+
+
+def start_campaign(name: str = "", is_test: bool = False, notes: str = "",
+                   auto: bool = False) -> dict:
+    """Create a campaign and make it active. Raises if one is already open (the operator must
+    close it explicitly — no implicit close)."""
+    if active_campaign() is not None:
+        raise RuntimeError("Una validazione è già attiva: chiudila prima di aprirne una nuova")
+    now = datetime.now()
+    root = validation_root()
+    root.mkdir(parents=True, exist_ok=True)
+    base = "{}_{}".format(now.strftime("%Y%m%d"), _slugify(name or "giornata", maxlen=40))
+    d = root / base
+    n = 1
+    while d.exists():
+        n += 1
+        d = root / "{}_{}".format(base, n)
+    d.mkdir(parents=True)
+    meta = {
+        "campaign_id": d.name, "name": (name or "").strip() or d.name,
+        "created_at": now.isoformat(), "closed_at": None,
+        "notes": (notes or "").strip(), "is_test": bool(is_test), "auto": bool(auto),
+    }
+    (d / "campaign.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    _marker_path().write_text(
+        json.dumps({"folder": d.name, "since": now.isoformat()}), encoding="utf-8")
+    logger.success("[Validation] Validazione aperta: {} ({})".format(meta["name"], d.name))
+    return _campaign_info(d)
+
+
+def close_campaign() -> dict:
+    """Close the active campaign (stamps closed_at, drops the marker)."""
+    camp = active_campaign()
+    if camp is None:
+        return {"active": None}
+    d = Path(camp["dir"])
+    try:
+        meta = json.loads((d / "campaign.json").read_text(encoding="utf-8"))
+    except Exception:
+        meta = {"campaign_id": d.name, "name": d.name}
+    meta["closed_at"] = datetime.now().isoformat()
+    (d / "campaign.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        _marker_path().unlink()
+    except OSError:
+        pass
+    logger.info("[Validation] Validazione chiusa: {}".format(meta.get("name", d.name)))
+    return {"active": None, "closed": _campaign_info(d)}
+
+
+def ensure_campaign() -> dict:
+    """The active campaign, creating the automatic daily one if none is open — a session is never
+    written outside a campaign."""
+    camp = active_campaign()
+    if camp is not None:
+        return camp
+    return start_campaign(name="giornata", is_test=False,
+                          notes="Creata automaticamente all'avvio della prima sessione", auto=True)
+
+
+def list_campaigns() -> List[dict]:
+    """All campaigns (newest first), with session counts. Legacy containers are not listed here —
+    the archive endpoint merges them under '(senza campagna)'."""
+    root = validation_root()
+    if not root.is_dir():
+        return []
+    out = [_campaign_info(d) for d in root.iterdir()
+           if d.is_dir() and (d / "campaign.json").is_file()]
+    out.sort(key=lambda c: c["folder"], reverse=True)
+    return out
 
 
 def _proc_io() -> dict:
@@ -415,15 +540,39 @@ class ValidationManager:
                 _settings.validation_record_video if record_video is None else bool(record_video)
             )
             now = datetime.now()
+
+            root = validation_root()
+            # Robustness (Task E5): never silently fall back to internal storage. If an external
+            # destination is configured, its mount point must exist & be writable now — otherwise
+            # warn and STOP. Only the default internal root is auto-created. (Checked BEFORE the
+            # campaign is resolved, since opening a campaign writes to that root.)
+            external = _dest_root is not None or bool(_settings.validation_dir.strip())
+            if external:
+                if not (root.parent.exists() and os.access(root.parent, os.W_OK)):
+                    raise RuntimeError(
+                        f"Destinazione esterna non disponibile/scrivibile ({root.parent}). "
+                        "Monta il disco esterno (o correggi VALIDATION_DIR/destinazione) — "
+                        "nessun fallback su storage interno."
+                    )
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise RuntimeError(f"Impossibile usare la root di validazione {root}: {exc}")
+
+            # The session nests inside the ACTIVE CAMPAIGN (auto daily one if none is open), and
+            # provaN counts only within it → a new campaign restarts the counter at 1.
+            campaign = ensure_campaign()
+            parent = Path(campaign["dir"])
+
             trial_key = None
             trial_n = None
             if trial_subjects:
                 # AUTO-generated name (operator never types it): derived from the registry
-                # selection + preset + profile → name↔GT cannot diverge. provaN = global counter.
+                # selection + preset + profile → name↔GT cannot diverge. provaN = per campaign.
                 prof_name = profile_summary()["profile"]
                 labels = [s.get("label", "?") for s in trial_subjects]
                 trial_key = make_trial_key(labels, preset_id, prof_name)
-                trial_n = count_trials(trial_key) + 1
+                trial_n = count_trials(trial_key, scope=parent) + 1
                 names_part = _slugify("-".join(
                     (s.get("name") or s.get("label") or "?") for s in trial_subjects), maxlen=60)
                 preset_part = _slugify(preset_id or "nopreset", maxlen=20)
@@ -440,28 +589,6 @@ class ValidationManager:
                 # Tag the profile in the folder name so Standard / Optimized sessions are
                 # unambiguously separate on disk (e.g. …_standard / …_optTX2).
                 base = f"{session_id}_{profile_slug()}"
-
-            root = validation_root()
-            # Robustness (Task E5): never silently fall back to internal storage. If an external
-            # destination is configured, its mount point must exist & be writable now — otherwise
-            # warn and STOP. Only the default internal root is auto-created.
-            external = _dest_root is not None or bool(_settings.validation_dir.strip())
-            if external:
-                if not (root.parent.exists() and os.access(root.parent, os.W_OK)):
-                    raise RuntimeError(
-                        f"Destinazione esterna non disponibile/scrivibile ({root.parent}). "
-                        "Monta il disco esterno (o correggi VALIDATION_DIR/destinazione) — "
-                        "nessun fallback su storage interno."
-                    )
-            try:
-                root.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise RuntimeError(f"Impossibile usare la root di validazione {root}: {exc}")
-
-            # Nest the session inside the automatic DAILY folder validation/<YYYYMMDD>/ —
-            # created/reused on the first start of the day, no manual open/close step.
-            parent = root / day_folder(now)
-            parent.mkdir(parents=True, exist_ok=True)
 
             # Never overwrite a session: create a NEW folder, appending _2/_3… on any collision.
             self._dir = parent / base
@@ -505,6 +632,8 @@ class ValidationManager:
                 "subjects_full": trial_subjects or [],
                 "trial_key": trial_key,
                 "trial_n": trial_n,
+                "campaign_id": campaign.get("campaign_id"),
+                "campaign_name": campaign.get("name"),
                 "record_video": self._record_video,
                 "ground_truth_source": gt_source,
                 # Active performance profile + its optimization parameters (Phase 1 vs Phase 2).

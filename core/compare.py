@@ -74,8 +74,16 @@ def scan_sessions(root: Optional[Path] = None) -> List[dict]:
         if (d / "session.json").is_file():
             _emit(d, None)                         # legacy flat session
         elif d.is_dir():                           # container dir → recurse one level
+            cf = d / "campaign.json"
             vf = d / "validation.json"
-            if vf.is_file():                       # legacy manual group (val_*)
+            if cf.is_file():                       # validation campaign (current layout)
+                try:
+                    c = json.loads(cf.read_text(encoding="utf-8"))
+                    group = {"folder": d.name, "name": c.get("name", d.name),
+                             "is_test": c.get("is_test")}
+                except Exception:
+                    group = {"folder": d.name, "name": d.name, "is_test": False}
+            elif vf.is_file():                     # legacy manual group (val_*)
                 try:
                     g = json.loads(vf.read_text(encoding="utf-8"))
                     group = {"folder": d.name, "name": g.get("name", d.name), "is_test": g.get("is_test")}

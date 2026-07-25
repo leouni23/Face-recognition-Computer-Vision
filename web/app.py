@@ -372,6 +372,10 @@ def list_persons():
                 "suffix": _person_suffix(packs_by_person.get(p.id, []), active_pack),
                 "active_pack": active_pack,
                 "active_letter": pack_letter(active_pack),
+                # True only if this person has a template for the ACTIVE pack, i.e. can actually be
+                # recognized right now. The UI shows these as the gallery; the others are listed
+                # apart as "registrati su un altro modello" (no phantom residue after a switch).
+                "for_active_pack": active_pack in packs_by_person.get(p.id, []),
             }
             for p in persons
         ])
@@ -555,23 +559,27 @@ def validation_start():
 
 @app.route("/api/validation/preview_name", methods=["POST"])
 def validation_preview_name():
-    """Preview of the auto-generated session name (Step 5 summary) without creating anything."""
+    """Preview of the auto-generated session name (summary step) without creating anything.
+    provaN is counted INSIDE the active campaign (a campaign that isn't open yet would be the
+    auto daily one → the preview then correctly shows prova1)."""
     from core.profile import profile_summary as _ps
-    from core.validation import count_trials, make_trial_key, _slugify
+    from core.validation import active_campaign, count_trials, make_trial_key, _slugify
     data = request.get_json(silent=True) or {}
     trial_subjects = _resolve_trial_subjects(data.get("subjects")) or []
     preset_id = data.get("preset_id") or None
     prof = _ps()["profile"]
     labels = [s["label"] for s in trial_subjects]
     key = make_trial_key(labels, preset_id, prof)
-    n = count_trials(key) + 1
+    camp = active_campaign()
+    n = count_trials(key, scope=(Path(camp["dir"]) if camp else None)) + 1
     names_part = _slugify("-".join(s["name"] for s in trial_subjects), maxlen=60) if trial_subjects else "x"
     from core.profile import profile_slug
     name = "{}_{}_{}_{}_prova{}".format(
         datetime.now().strftime("%Y%m%d_%H%M%S"), names_part,
         _slugify(preset_id or "nopreset", maxlen=20), profile_slug(), n)
     return jsonify({"name": name, "trial_n": n, "trial_key": key,
-                    "day_folder": datetime.now().strftime("%Y%m%d")})
+                    "campaign": (camp or {}).get("name"),
+                    "campaign_folder": (camp or {}).get("folder")})
 
 
 @app.route("/api/validation/run", methods=["POST"])
@@ -646,16 +654,18 @@ def validation_sessions():
 
 @app.route("/api/validation/groups")
 def validation_groups():
-    """Archivio: sessions grouped by DAILY folder (auto layout validation/<YYYYMMDD>/), plus
-    legacy manual groups (val_*) and flat sessions under "(senza validazione)". Read-only."""
+    """Archivio: sessions grouped by CAMPAIGN, plus every legacy container (daily folders, manual
+    val_* groups) and flat sessions under "(senza campagna)". Read-only."""
     from core.compare import scan_sessions
+    from core.validation import active_campaign
     groups = {}
     order = []
-    today = datetime.now().strftime("%Y%m%d")
+    camp = active_campaign()
+    active_folder = camp["folder"] if camp else None
     for s in scan_sessions():
         key = s.get("group") or "__flat__"
         if key not in groups:
-            gname = s.get("group_name") or "(senza validazione)"
+            gname = s.get("group_name") or "(senza campagna)"
             groups[key] = {
                 "folder": s.get("group"), "name": gname,
                 "is_test": s.get("is_test", False), "sessions": [], "profiles": set(),
@@ -665,16 +675,92 @@ def validation_groups():
         g["sessions"].append(s)
         if s.get("profile"):
             g["profiles"].add(s["profile"])
+    # An empty campaign has no sessions, so scan_sessions can't surface it — merge them in.
+    for c in _campaigns():
+        if c["folder"] not in groups:
+            groups[c["folder"]] = {"folder": c["folder"], "name": c["name"],
+                                   "is_test": c["is_test"], "sessions": [], "profiles": set()}
+            order.append(c["folder"])
     out = []
     for key in sorted(order, key=lambda k: (groups[k]["folder"] or ""), reverse=True):
         g = groups[key]
         out.append({
             "folder": g["folder"], "name": g["name"], "is_test": g["is_test"],
-            "active": g["folder"] == today,  # the current day's folder
+            "active": g["folder"] is not None and g["folder"] == active_folder,
             "n_sessions": len(g["sessions"]), "profiles": sorted(g["profiles"]),
             "sessions": g["sessions"],
         })
     return jsonify(out)
+
+
+# ── Validation campaigns (experiment containers; provaN restarts inside each) ──────
+
+def _campaigns():
+    from core.validation import list_campaigns
+    return list_campaigns()
+
+
+@app.route("/api/validation/campaign/active")
+def validation_campaign_active():
+    from core.validation import active_campaign
+    return jsonify({"active": active_campaign()})
+
+
+@app.route("/api/validation/campaigns")
+def validation_campaigns():
+    return jsonify(_campaigns())
+
+
+@app.route("/api/validation/campaign/start", methods=["POST"])
+def validation_campaign_start():
+    """Open a campaign. 409 if one is already open — the operator closes it explicitly (no
+    implicit close), so sessions can never land in the wrong container."""
+    from core.validation import start_campaign
+    data = request.get_json(silent=True) or {}
+    try:
+        camp = start_campaign(name=data.get("name", ""), is_test=bool(data.get("is_test")),
+                              notes=data.get("notes", ""))
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+    except OSError as exc:
+        return jsonify({"error": "Impossibile creare la validazione: {}".format(exc)}), 500
+    return jsonify(camp)
+
+
+@app.route("/api/validation/campaign/close", methods=["POST"])
+def validation_campaign_close():
+    from core.validation import close_campaign
+    if validation_manager.is_active():
+        return jsonify({"error": "Ferma prima la sessione in corso"}), 409
+    return jsonify(close_campaign())
+
+
+@app.route("/api/validation/campaign/<folder>", methods=["DELETE"])
+def validation_campaign_delete(folder: str):
+    """Delete a TEST campaign and its sessions. Non-test → 403 (real data is never deletable
+    from the UI)."""
+    import shutil
+    from core.validation import active_campaign, close_campaign, validation_root
+    if "/" in folder or "\\" in folder or folder in ("", ".", ".."):
+        return jsonify({"error": "id non valido"}), 400
+    root = validation_root().resolve()
+    d = (root / folder).resolve()
+    if not (d.is_dir() and root in d.parents and (d / "campaign.json").is_file()):
+        return jsonify({"error": "Validazione non trovata"}), 404
+    try:
+        meta = json.loads((d / "campaign.json").read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+    if not meta.get("is_test"):
+        return jsonify({"error": "Solo le validazioni di prova (test) sono eliminabili"}), 403
+    if validation_manager.is_active():
+        return jsonify({"error": "Ferma prima la sessione in corso"}), 409
+    camp = active_campaign()
+    if camp and camp["folder"] == folder:
+        close_campaign()
+    shutil.rmtree(str(d), ignore_errors=True)
+    logger.info(f"[Validation] Validazione di prova eliminata: {folder}")
+    return jsonify({"deleted": folder})
 
 
 @app.route("/api/validation/compare")
