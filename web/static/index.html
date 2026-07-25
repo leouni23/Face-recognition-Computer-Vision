@@ -505,12 +505,18 @@ es.onmessage = e => {
 // Active-model letter (_L/_S) for live-recognition labels; kept in sync from /api/persons.
 let activeLetter = '';
 function loadPersons() {
-  fetch('/api/persons').then(r => r.json()).then(persons => {
-    if (persons.length) activeLetter = persons[0].active_letter || activeLetter;
+  fetch('/api/persons').then(r => r.json()).then(all => {
+    if (all.length) activeLetter = all[0].active_letter || activeLetter;
     const list = document.getElementById('person-list');
     list.innerHTML = '';
+    // La galleria mostra SOLO chi ha un embedding per il modello ATTIVO (chi è registrato solo
+    // sull'altro modello non è riconoscibile ora: elencato a parte, nessun residuo fantasma).
+    const persons = all.filter(p => p.for_active_pack !== false);
+    const others = all.filter(p => p.for_active_pack === false);
     if (!persons.length) {
-      list.innerHTML = '<p class="text-xs text-gray-600 px-1">Nessuna persona iscritta.</p>';
+      list.innerHTML = '<p class="text-xs text-gray-600 px-1">Nessuna persona iscritta per il modello attivo'
+        + (others.length ? ` (${others.length} registrata/e su un altro modello: ri-registrale per usarle qui).` : '.')
+        + '</p>';
       return;
     }
     persons.forEach(p => {
@@ -539,6 +545,12 @@ function loadPersons() {
       div.appendChild(delBtn);
       list.appendChild(div);
     });
+    if (others.length) {
+      const note = document.createElement('p');
+      note.className = 'text-[11px] text-gray-600 px-1 pt-1';
+      note.textContent = `+ ${others.length} registrata/e su un altro modello (${others.map(o=>o.name+(o.suffix||'')).join(', ')}) — non riconoscibili col profilo attivo.`;
+      list.appendChild(note);
+    }
   }).catch(() => {
     document.getElementById('person-list').innerHTML =
       '<p class="text-xs text-red-500 px-1">Errore caricamento persone.</p>';

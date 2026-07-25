@@ -121,8 +121,28 @@
       </div>
     </section>
 
+    <!-- ══ Validazione attiva (campagna: contenitore dell'esperimento) ══ -->
+    <!-- Aprire/chiudere una validazione NON tocca la configurazione (preset/disco): cambia solo
+         il contenitore delle sessioni e il contatore provaN, che riparte da 1. -->
+    <section class="bg-gray-900 rounded-2xl p-4 space-y-2 border border-emerald-900/40">
+      <div class="flex flex-wrap items-center gap-2">
+        <h2 class="text-xs font-semibold text-emerald-400 uppercase tracking-widest">🧪 Validazione attiva</h2>
+        <span id="camp-status" class="text-sm text-gray-400">…</span>
+        <div class="ml-auto flex items-center gap-2">
+          <button id="camp-new-btn" onclick="campNew()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed">▶ Nuova validazione</button>
+          <button id="camp-close-btn" onclick="campClose()" class="hidden px-3 py-1.5 rounded-lg bg-red-700 hover:bg-red-600 text-sm font-semibold">■ Chiudi validazione</button>
+        </div>
+      </div>
+      <div id="camp-new-form" class="hidden flex flex-wrap items-center gap-2">
+        <input id="camp-name" class="fld flex-1 min-w-[10rem]" placeholder="nome validazione (es. esperimento-luci-basse)" />
+        <label class="text-[11px] text-gray-400 flex items-center gap-1"><input type="checkbox" id="camp-test" class="accent-amber-500" /> di prova (eliminabile)</label>
+        <button onclick="campCreate()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold">Crea</button>
+        <button onclick="campCancelNew()" class="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-sm">Annulla</button>
+      </div>
+      <div class="text-[11px] text-gray-600">Le sessioni finiscono dentro la validazione attiva; <b>provaN riparte da 1</b> in ogni nuova validazione. Se non ne apri una, la prima sessione ne crea automaticamente una di giornata.</div>
+    </section>
+
     <!-- ══ Nuova sessione (wizard) / Sessione in corso (summary) ══ -->
-    <!-- Le sessioni finiscono AUTOMATICAMENTE nella cartella del giorno validation/<YYYYMMDD>/ -->
     <section id="wizard" class="relative bg-gray-900 rounded-2xl p-4 space-y-4">
       <div class="flex items-center gap-2">
         <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">▶ Nuova sessione</h2>
@@ -165,7 +185,7 @@
           <button onclick="addUnknown()" class="mt-1.5 text-xs text-sky-400 hover:text-sky-300">+ aggiungi sconosciuto</button>
         </div>
         <div class="flex items-center gap-2">
-          <button onclick="saveSubjects()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold">Salva registro</button>
+          <span class="text-[11px] text-gray-600">Il registro si salva da solo a ogni modifica.</span>
           <span id="subjects-msg" class="text-xs text-gray-500"></span>
         </div>
         <div id="wiz-participants" class="text-xs text-emerald-300"></div>
@@ -490,7 +510,12 @@ function renderPresetList() {
 // Il suffisso _L/_S (modello dell'embedding) è SOLO visuale: i payload inviano person_id, i nomi
 // salvati (sessione/GT) restano puliti.
 function personLabel(p){ return p ? (p.name + (p.suffix || '')) : null; }
-function personOptions(sel){ return '<option value="">—</option>'+persons.map(p=>`<option value="${p.id}" ${p.id===sel?'selected':''}>${esc(p.name)}${esc(p.suffix||'')} (#${p.id})</option>`).join(''); }
+function personOptions(sel){
+  // Solo persone registrate sul modello ATTIVO: mappare un soggetto a una persona non
+  // riconoscibile col profilo corrente produrrebbe una ground truth impossibile da soddisfare.
+  const usable = persons.filter(p => p.for_active_pack !== false || p.id === sel);
+  return '<option value="">—</option>'+usable.map(p=>`<option value="${p.id}" ${p.id===sel?'selected':''}>${esc(p.name)}${esc(p.suffix||'')} (#${p.id})${p.for_active_pack===false?' — altro modello':''}</option>`).join('');
+}
 function enrolledName(e){ return personLabel((persons||[]).find(x=>x.id===e.person_id)); }
 function renderSubjects() {
   const er = document.getElementById('enrolled-rows');
@@ -508,16 +533,34 @@ function renderSubjects() {
        <button onclick="rmUnknown(${i})" class="text-gray-600 hover:text-red-400">✕</button></span>`).join('');
   refreshParticipants();
 }
-function onEnrolledPick(i, val){ subjects.enrolled[i].person_id = val ? +val : null; renderSubjects(); }
-function addEnrolled(){ subjects.enrolled.push({label:'S'+(subjects.enrolled.length+1), person_id:null}); renderSubjects(); }
-function rmEnrolled(i){ subjects.enrolled.splice(i,1); subjects.enrolled.forEach((e,k)=>e.label='S'+(k+1)); renderSubjects(); }
-function addUnknown(){ subjects.unknown.push({label:'U'+(subjects.unknown.length+1)}); renderSubjects(); }
-function rmUnknown(i){ subjects.unknown.splice(i,1); subjects.unknown.forEach((u,k)=>u.label='U'+(k+1)); renderSubjects(); }
+// Ogni mutazione del registro persiste da sola (debounce): niente più stato "non salvato"
+// ambiguo — è impossibile avviare una sessione con un registro non applicato.
+function onEnrolledPick(i, val){ subjects.enrolled[i].person_id = val ? +val : null; renderSubjects(); autoSaveSubjects(); }
+function addEnrolled(){ subjects.enrolled.push({label:'S'+(subjects.enrolled.length+1), person_id:null}); renderSubjects(); autoSaveSubjects(); }
+function rmEnrolled(i){ subjects.enrolled.splice(i,1); subjects.enrolled.forEach((e,k)=>e.label='S'+(k+1)); renderSubjects(); autoSaveSubjects(); }
+function addUnknown(){ subjects.unknown.push({label:'U'+(subjects.unknown.length+1)}); renderSubjects(); autoSaveSubjects(); }
+function rmUnknown(i){ subjects.unknown.splice(i,1); subjects.unknown.forEach((u,k)=>u.label='U'+(k+1)); renderSubjects(); autoSaveSubjects(); }
+
+let _subjSaveTimer = null;
+function subjMsg(txt, cls){
+  const el = document.getElementById('subjects-msg'); if (!el) return;
+  el.className = 'text-xs ' + (cls || 'text-gray-500'); el.textContent = txt;
+}
+function autoSaveSubjects(){
+  subjMsg('salvataggio…');
+  if (_subjSaveTimer) clearTimeout(_subjSaveTimer);
+  _subjSaveTimer = setTimeout(saveSubjects, 600);
+}
 function saveSubjects() {
+  if (_subjSaveTimer) { clearTimeout(_subjSaveTimer); _subjSaveTimer = null; }
   document.querySelectorAll('[data-ei]').forEach(s=>{ subjects.enrolled[+s.dataset.ei].person_id = s.value ? +s.value : null; });
-  fetch('/api/validation/subjects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(subjects)})
+  return fetch('/api/validation/subjects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(subjects)})
     .then(r=>r.json()).then(reg=>{ subjects=reg; renderSubjects(); fillPresetPickers();
-      document.getElementById('subjects-msg').textContent='✓ salvato'; setTimeout(()=>document.getElementById('subjects-msg').textContent='',2000); });
+      subjMsg('✓ salvato', 'text-emerald-400');
+      setTimeout(()=>{ const el=document.getElementById('subjects-msg');
+        if (el && el.textContent==='✓ salvato') el.textContent=''; }, 2000);
+    })
+    .catch(()=>{ subjMsg('⚠ salvataggio fallito — riprova modificando il registro', 'text-red-400'); });
 }
 function subjectLabels(){ return [...subjects.enrolled.map(e=>e.label), ...subjects.unknown.map(u=>u.label)]; }
 
@@ -627,6 +670,7 @@ function renderWizSummary() {
   const p = presets.find(x=>x.preset_id===(wiz.presetId||document.getElementById('preset-pick').value));
   const picked = participantsList();
   document.getElementById('wiz-summary').innerHTML = `
+    <div><span class="text-gray-500">Validazione:</span> ${campActive ? '<b class="text-emerald-300">'+esc(campActive.name)+'</b>' : '<span class="text-gray-400">automatica di giornata (nessuna aperta)</span>'}</div>
     <div><span class="text-gray-500">Partecipanti:</span> <b>${picked.map(s=>esc(s.label)+' — '+esc(s.name)+(s.person_id!=null?' (#'+s.person_id+')':'')).join(', ')||'—'}</b></div>
     <div><span class="text-gray-500">Tipo:</span> ${wiz.sessionType==='common'?'Gruppo (statici)':'Singola (attraversamenti)'}</div>
     <div><span class="text-gray-500">Modalità:</span> ${wiz.recordVideo ? '🎥 registrazione video' : '<b class="text-emerald-400">🗺 mappatura — nessuna immagine su disco</b>'}</div>
@@ -738,7 +782,7 @@ function applyRun() {
 }
 function stopSession() {
   fetch('/api/validation/stop', {method:'POST'}).then(r=>r.json()).then(()=>{
-    pollStatus(); refreshSessions(); loadArchive();
+    pollStatus(); refreshSessions(); loadArchive(); campLoad();  // contatore sessioni campagna
     // Nuova sessione: riparti dallo Step 1 (tipo) con le selezioni precedenti preservate
     // (destinazione in Config, preset/registro nello stato + localStorage).
     wiz.step = 1; showStep();
@@ -851,7 +895,67 @@ function runCompare(){
   }).catch(()=>{ out.textContent='Errore nel confronto.'; });
 }
 
-// ════ Archivio (le sessioni finiscono automaticamente nella cartella del giorno) ════
+// ════ Validazione attiva (campagna) ════
+// Nota: queste funzioni toccano SOLO lo stato campagna. Nessun reload di preset/disco/wizard →
+// aprendo una nuova validazione la configurazione dell'esperimento resta invariata.
+let campActive = null;
+function campRender(){
+  const st = document.getElementById('camp-status');
+  const newBtn = document.getElementById('camp-new-btn');
+  const closeBtn = document.getElementById('camp-close-btn');
+  if (campActive){
+    st.innerHTML = `«<b class="text-emerald-300">${esc(campActive.name)}</b>» · ${campActive.n_sessions||0} sessioni`
+      + (campActive.is_test ? ' <span class="text-amber-400 text-[11px]">[prova]</span>' : '')
+      + (campActive.auto ? ' <span class="text-gray-600 text-[11px]">(automatica di giornata)</span>' : '');
+    newBtn.disabled = true; newBtn.title = 'Chiudi prima la validazione attiva';
+    closeBtn.classList.remove('hidden');
+  } else {
+    st.textContent = 'nessuna validazione attiva';
+    newBtn.disabled = false; newBtn.title = '';
+    closeBtn.classList.add('hidden');
+  }
+}
+function campLoad(){
+  return fetch('/api/validation/campaign/active').then(r=>r.json())
+    .then(d=>{ campActive = d.active; campRender(); }).catch(()=>{});
+}
+function campNew(){
+  document.getElementById('camp-new-form').classList.remove('hidden');
+  const n = document.getElementById('camp-name');
+  if (!n.value) n.value = 'esperimento ' + new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
+  n.focus();
+}
+function campCancelNew(){ document.getElementById('camp-new-form').classList.add('hidden'); }
+function campCreate(){
+  const body = { name: document.getElementById('camp-name').value.trim(),
+                 is_test: document.getElementById('camp-test').checked };
+  fetch('/api/validation/campaign/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>r.json().then(d=>({s:r.status,d}))).then(({s,d})=>{
+      if(s>=400){ alert(d.error||'Errore'); return; }
+      campCancelNew();
+      document.getElementById('camp-name').value=''; document.getElementById('camp-test').checked=false;
+      campActive = d; campRender(); loadArchive();
+      if (wiz.step === wiz.maxStep) renderWizSummary();   // aggiorna provaN nel riepilogo
+    }).catch(()=>alert('Errore di rete.'));
+}
+function campClose(){
+  if(!confirm('Chiudere la validazione «'+(campActive?campActive.name:'')+'»?\nLe sessioni restano salvate; la prossima validazione riparte da prova1.')) return;
+  fetch('/api/validation/campaign/close',{method:'POST'}).then(r=>r.json().then(d=>({s:r.status,d}))).then(({s,d})=>{
+    if(s>=400){ alert(d.error||'Errore'); return; }
+    campActive = null; campRender(); loadArchive();
+  }).catch(()=>alert('Errore di rete.'));
+}
+function campDelete(folder, ev){
+  if(ev) ev.preventDefault();
+  if(!confirm('Eliminare la validazione di prova «'+folder+'» e TUTTE le sue sessioni?')) return;
+  fetch('/api/validation/campaign/'+encodeURIComponent(folder),{method:'DELETE'})
+    .then(r=>r.json().then(d=>({s:r.status,d}))).then(({s,d})=>{
+      if(s>=400){ alert(d.error||'Errore'); return; }
+      campLoad(); loadArchive(); refreshSessions();
+    });
+}
+
+// ════ Archivio (sessioni raggruppate per validazione/campagna) ════
 function loadArchive(){
   fetch('/api/validation/groups').then(r=>r.json()).then(gs=>{
     const box=document.getElementById('archive');
@@ -862,12 +966,14 @@ function loadArchive(){
           ${esc(s.session_id)} · ${esc(s.profile||'')} ${s.session_type?('· '+esc(s.session_type)):''}
         </button>`).join('') || '<div class="text-[11px] text-gray-600 px-3">nessuna sessione</div>';
       const badge = g.is_test ? ' <span class="text-amber-400 text-[10px]">[prova]</span>' : '';
-      const act = g.active ? ' <span class="text-emerald-400 text-[10px]">[oggi]</span>' : '';
+      const act = g.active ? ' <span class="text-emerald-400 text-[10px]">[attiva]</span>' : '';
+      // eliminabili SOLO le validazioni di prova (il server rifiuta comunque le altre con 403)
+      const del = (g.is_test && g.folder) ? `<button onclick="campDelete('${esc(g.folder)}',event)" class="text-red-400 hover:text-red-300 text-xs" title="Elimina validazione di prova">🗑</button>` : '';
       return `<details class="bg-gray-900 rounded-xl border border-gray-800" ${g.active?'open':''}>
         <summary class="px-3 py-2 flex items-center gap-2 cursor-pointer">
           <span class="font-medium">${esc(g.name)}</span>${badge}${act}
           <span class="text-[11px] text-gray-500">${(g.profiles||[]).join(', ')}</span>
-          <span class="ml-auto text-[11px] text-gray-500">${g.n_sessions} sess.</span>
+          <span class="ml-auto text-[11px] text-gray-500">${g.n_sessions} sess.</span>${del}
         </summary>
         <div class="px-2 pb-2 space-y-1">${sess}</div></details>`;
     }).join('');
@@ -898,6 +1004,7 @@ document.getElementById('wiz-day').textContent =
 loadArchive();
 loadConfig(); detectDrives(); showStep();
 loadValCameraGrid();   // anteprima live (una volta; l'<img> MJPEG streamma da solo, nessun polling)
+campLoad();            // validazione attiva (campagna) — solo stato, non tocca la configurazione
 </script>
 <script src="/static/validation_review.js"></script>
 </body>

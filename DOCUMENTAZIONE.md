@@ -769,6 +769,42 @@ buffalo_s = w600k_mbf) e non devono MAI mischiarsi.
   (`/api/enroll/start|capture|save|cancel`); `start` accetta `continuous:true` (modalità manuale
   legacy ancora supportata).
 
+### 11.11 Validazioni (campagne): contenitore d'esperimento e provaN
+
+Una **validazione (campagna)** è il contenitore dell'esperimento:
+`validation/<YYYYMMDD>_<nome>/` con `campaign.json`
+(`campaign_id`, `name`, `created_at`, `closed_at`, `notes`, `is_test`, `auto`) e dentro le sessioni
+(struttura di sessione **invariata**: cambia solo il genitore).
+
+- **provaN è relativo alla campagna:** `count_trials(trial_key, scope=<campagna>)` conta solo
+  dentro il contenitore attivo → in una validazione nuova la prima sessione di una combinazione
+  (soggetti+preset+profilo) è sempre `prova1`. Prima il contatore era globale sull'intero albero e
+  arrivava a `prova7` anche per esperimenti slegati.
+- **Apertura/chiusura:** barra "🧪 Validazione attiva" sopra il wizard — `▶ Nuova validazione`
+  (nome + flag "di prova") e `■ Chiudi validazione`. Aprire una nuova con una già attiva è
+  **bloccato** (409): si chiude prima, esplicitamente. **Aprire/chiudere non tocca la
+  configurazione**: preset, destinazione validata e profilo restano invariati (cambia solo il
+  contenitore e il contatore).
+- **Nessuna sessione sciolta:** se non c'è una campagna aperta, la prima sessione ne crea una
+  **automatica di giornata** (`<YYYYMMDD>_giornata`, `auto:true`) — nessun blocco per l'operatore.
+- **Persistenza:** la campagna attiva è un marker `validation/.active_campaign.json`, letto
+  **on-demand** (mai al boot → nessun rischio dotenv) e residente sul disco dati, quindi sopravvive
+  a `docker restart` e segue il disco. Un marker che punta a una cartella rimossa = "nessuna
+  attiva" (nessun crash).
+- **API:** `GET /api/validation/campaign/active`, `GET /api/validation/campaigns`,
+  `POST /api/validation/campaign/start|close`, `DELETE /api/validation/campaign/<folder>`
+  (solo `is_test`, altrimenti 403).
+- **Retro-compatibilità:** `scan_sessions` riconosce campagne (`campaign.json`), vecchi gruppi
+  manuali (`validation.json`), cartelle giornaliere e sessioni flat; l'archivio le raggruppa tutte
+  (le legacy sotto "(senza campagna)") e il Confronto fasi continua a funzionare. Nessuna
+  migrazione dei dati esistenti.
+- **Registro soggetti auto-save:** ogni modifica persiste da sola (debounce ~600 ms) — niente più
+  stato "non salvato" ambiguo; l'indicatore mostra "salvataggio…/✓ salvato".
+- **Galleria per modello attivo:** `/api/persons` espone `for_active_pack`; dashboard e menu del
+  registro mostrano **solo** chi ha un embedding per il pack attivo (gli altri sono elencati a
+  parte come "registrati su un altro modello"), così dopo uno switch non resta nessun residuo
+  fantasma del modello precedente.
+
 ---
 
 ## 12. Bot Telegram
