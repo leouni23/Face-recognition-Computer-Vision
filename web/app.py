@@ -154,10 +154,15 @@ def enroll_start():
         required = max(1, min(20, int(data.get("samples", 5))))
     except (TypeError, ValueError):
         required = 5
+    continuous = bool(data.get("continuous", False))
     with _enroll_lock:
         _enroll_session.clear()
-        _enroll_session.update({"name": name, "embeddings": [], "required": required})
-    return jsonify({"message": f"Sessione avviata per '{name}'", "required": required})
+        # continuous mode: the client auto-captures frames until Stop; cap bounds the memory (the
+        # mean embedding has long since stabilised well before this).
+        _enroll_session.update({"name": name, "embeddings": [], "required": required,
+                                "continuous": continuous, "cap": 300})
+    return jsonify({"message": f"Sessione avviata per '{name}'", "required": required,
+                    "continuous": continuous})
 
 
 @app.route("/api/enroll/capture", methods=["POST"])
@@ -167,19 +172,36 @@ def enroll_capture():
             return jsonify({"error": "Nessuna sessione attiva. Chiama /api/enroll/start prima."}), 400
         name = _enroll_session["name"]
         required = _enroll_session["required"]
+        continuous = _enroll_session.get("continuous", False)
+        cap = _enroll_session.get("cap", 300)
         collected = len(_enroll_session["embeddings"])
 
-    # grab the latest raw frame from the first available camera
+    # Continuous mode is a client-driven ~5 fps loop: a frame with no / multiple faces must NOT
+    # error the loop — return 200 with captured=false so it just keeps going. Manual mode keeps
+    # the strict 422 responses. A safety cap bounds the collected samples.
+    def soft(reason, code=200):
+        if continuous:
+            return jsonify({"collected": collected, "required": required, "continuous": True,
+                            "captured": False, "reason": reason}), code
+        return jsonify({"error": reason}), 422
+
+    if continuous and collected >= cap:
+        return jsonify({"collected": collected, "required": required, "continuous": True,
+                        "captured": False, "capped": True}), 200
+
     camera_id = (broadcaster.camera_ids or ["0"])[0]
     frame = broadcaster.get_raw_frame(camera_id)
     if frame is None:
+        if continuous:
+            return jsonify({"collected": collected, "required": required, "continuous": True,
+                            "captured": False, "reason": "Nessun frame dalla camera"}), 200
         return jsonify({"error": "Nessun frame disponibile dalla camera"}), 503
 
     faces = detect_and_encode(frame)
     if not faces:
-        return jsonify({"error": "Nessun volto rilevato. Avvicinati alla camera."}), 422
+        return soft("Nessun volto rilevato. Avvicinati alla camera.")
     if len(faces) > 1:
-        return jsonify({"error": "Più volti nell'inquadratura. Assicurati di essere solo."}), 422
+        return soft("Più volti nell'inquadratura. Assicurati di essere solo.")
 
     _, embedding = faces[0]
     with _enroll_lock:
@@ -188,9 +210,10 @@ def enroll_capture():
             return jsonify({"error": "Sessione annullata"}), 409
         _enroll_session["embeddings"].append(embedding)
         collected = len(_enroll_session["embeddings"])
-        done = collected >= required
+        done = (not continuous) and collected >= required
 
-    return jsonify({"collected": collected, "required": required, "done": done})
+    return jsonify({"collected": collected, "required": required, "continuous": continuous,
+                    "captured": True, "done": done})
 
 
 @app.route("/api/enroll/save", methods=["POST"])

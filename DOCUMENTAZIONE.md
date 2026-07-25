@@ -748,6 +748,27 @@ buffalo_s = w600k_mbf) e non devono MAI mischiarsi.
   **display-only**: i payload inviano `person_id` e i nomi salvati (nome-sessione, ground-truth,
   `detections.jsonl`, metriche) restano puliti, senza suffisso.
 
+### 11.10 Distanza live (optimized), rallentamento allo switch, cattura continua
+
+- **Distanza/confidenza che si aggiorna in profilo optimized:** il tracker IoU cacha l'embedding di
+  un volto per saltare il forward ArcFace; senza un re-embed periodico il match gira sullo stesso
+  embedding e la % a video resta **congelata**. `OPT_REEMBED_EVERY` (default 10) forza il re-embed
+  di un volto tracciato ogni N frame processati → la distanza si aggiorna ~1-2×/s mantenendo gran
+  parte del risparmio del tracker. 0 = comportamento vecchio (distanza statica). Standard re-embedda
+  sempre (non usa il tracker).
+- **Rallentamento del video al cambio profilo (NORMALE, non un bug):** allo switch il nuovo profilo
+  ricostruisce l'analyzer / gli engine TensorRT in **background** mentre il vecchio continua a
+  servire i frame → contesa CPU/GPU sulla TX2 → calo temporaneo di FPS del live. Si normalizza a
+  build completata; dalla 2ª volta è quasi istantaneo grazie alla cache degli engine
+  (`/data/engines`). Nessuna azione richiesta.
+- **Registrazione volto a cattura continua:** la registrazione non ha più il limite di 5 scatti
+  manuali. Si preme **● Avvia cattura** e il client acquisisce ~5 frame/s (finché non si preme
+  **■ Stop e salva**); i frame senza volto o con più volti vengono saltati senza interrompere il
+  loop; l'embedding salvato è la **media di TUTTI** i campioni raccolti (più frame → embedding più
+  robusto, come il riconoscimento autonomo). Cap di sicurezza a 300 campioni. Endpoint invariati
+  (`/api/enroll/start|capture|save|cancel`); `start` accetta `continuous:true` (modalità manuale
+  legacy ancora supportata).
+
 ---
 
 ## 12. Bot Telegram

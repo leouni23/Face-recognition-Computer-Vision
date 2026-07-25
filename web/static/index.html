@@ -344,16 +344,14 @@
         <div id="enroll-active" class="hidden space-y-3">
           <p class="text-sm text-gray-300">Registrazione: <span id="enroll-name-label" class="font-semibold text-emerald-400"></span></p>
           <div class="flex items-center gap-3">
-            <div class="flex-1 bg-gray-800 rounded-full h-2">
-              <div id="enroll-progress-bar" class="bg-emerald-500 h-2 rounded-full transition-all" style="width:0%"></div>
-            </div>
-            <span id="enroll-progress-text" class="text-xs text-gray-400 tabular-nums w-10 text-right">0/5</span>
+            <span id="enroll-count" class="text-2xl font-bold tabular-nums text-emerald-400">0</span>
+            <span class="text-xs text-gray-500">campioni acquisiti — più ne raccogli, migliore è l'embedding</span>
           </div>
-          <p id="enroll-msg" class="text-xs text-gray-500 min-h-[1rem]"></p>
+          <p id="enroll-msg" class="text-xs text-gray-500 min-h-[1rem]">Posizionati davanti alla webcam e premi <b>Avvia cattura</b>. Muovi leggermente la testa (angolazioni diverse).</p>
           <div class="flex gap-2">
-            <button onclick="enrollCapture()" id="enroll-capture-btn"
+            <button onclick="enrollToggleCapture()" id="enroll-capture-btn"
                     class="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold transition-colors">
-              Cattura
+              ● Avvia cattura
             </button>
             <button onclick="enrollCancel()"
                     class="px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-sm transition-colors">
@@ -576,8 +574,10 @@ document.getElementById('modal').addEventListener('click', e => {
 });
 
 
-// ── Enrollment ─────────────────────────────────────────────────────────────
-let _enrollRequired = 5;
+// ── Enrollment (cattura continua: Avvia → ~5 fps fino a Stop → media di TUTTI i campioni) ──
+let _enrollTimer = null;   // setInterval della cattura continua (null = ferma)
+let _enrollInFlight = false; // guardia anti-sovrapposizione richieste
+let _enrollCount = 0;
 
 function enrollStart() {
   const name = document.getElementById('enroll-name').value.trim();
@@ -585,51 +585,69 @@ function enrollStart() {
   fetch('/api/enroll/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name, samples: 5})
+    body: JSON.stringify({name, continuous: true})
   }).then(r => r.json()).then(d => {
     if (d.error) { alert(d.error); return; }
-    _enrollRequired = d.required;
+    _enrollCount = 0;
     document.getElementById('enroll-name-label').textContent = name;
-    document.getElementById('enroll-progress-text').textContent = `0/${_enrollRequired}`;
-    document.getElementById('enroll-progress-bar').style.width = '0%';
-    document.getElementById('enroll-msg').textContent = 'Posizionati davanti alla webcam e premi Cattura.';
+    document.getElementById('enroll-count').textContent = '0';
+    document.getElementById('enroll-msg').innerHTML = 'Premi <b>Avvia cattura</b>, poi muovi leggermente la testa.';
+    document.getElementById('enroll-capture-btn').textContent = '● Avvia cattura';
     document.getElementById('enroll-idle').classList.add('hidden');
     document.getElementById('enroll-active').classList.remove('hidden');
   }).catch(() => alert('Errore di rete.'));
 }
 
-function enrollCapture() {
+function enrollStopCapture() {
+  if (_enrollTimer) { clearInterval(_enrollTimer); _enrollTimer = null; }
+}
+
+function enrollToggleCapture() {
   const btn = document.getElementById('enroll-capture-btn');
-  btn.disabled = true;
-  btn.textContent = '...';
+  if (_enrollTimer) {                       // era in cattura → Stop e salva
+    enrollStopCapture();
+    enrollSave();
+    return;
+  }
+  // avvia il loop ~5 fps (ogni 200ms); tick salta se la richiesta precedente è in volo
+  btn.textContent = '■ Stop e salva';
+  document.getElementById('enroll-msg').textContent = 'Cattura in corso…';
+  _enrollTimer = setInterval(enrollTick, 200);
+}
+
+function enrollTick() {
+  if (_enrollInFlight) return;
+  _enrollInFlight = true;
   fetch('/api/enroll/capture', {method: 'POST'})
     .then(r => r.json())
     .then(d => {
-      btn.disabled = false;
-      btn.textContent = 'Cattura';
-      if (d.error) {
-        document.getElementById('enroll-msg').textContent = '⚠ ' + d.error;
-        return;
+      _enrollInFlight = false;
+      if (d.error) { document.getElementById('enroll-msg').textContent = '⚠ ' + d.error; return; }
+      _enrollCount = d.collected;
+      document.getElementById('enroll-count').textContent = String(d.collected);
+      if (d.capped) {
+        document.getElementById('enroll-msg').textContent = 'Raccolti abbastanza campioni: premi Stop e salva.';
+        enrollStopCapture();
+        document.getElementById('enroll-capture-btn').textContent = '■ Stop e salva';
+      } else if (d.captured) {
+        document.getElementById('enroll-msg').textContent = `Campione ${d.collected} acquisito.`;
+      } else if (d.reason) {
+        document.getElementById('enroll-msg').textContent = '… ' + d.reason;
       }
-      const pct = (d.collected / d.required * 100).toFixed(0);
-      document.getElementById('enroll-progress-bar').style.width = pct + '%';
-      document.getElementById('enroll-progress-text').textContent = `${d.collected}/${d.required}`;
-      document.getElementById('enroll-msg').textContent = `Campione ${d.collected}/${d.required} acquisito.`;
-      if (d.done) enrollSave();
     })
-    .catch(() => {
-      btn.disabled = false;
-      btn.textContent = 'Cattura';
-      document.getElementById('enroll-msg').textContent = '⚠ Errore di rete.';
-    });
+    .catch(() => { _enrollInFlight = false; document.getElementById('enroll-msg').textContent = '⚠ Errore di rete.'; });
 }
 
 function enrollSave() {
-  document.getElementById('enroll-msg').textContent = 'Salvataggio in corso...';
+  enrollStopCapture();
+  if (_enrollCount < 1) { document.getElementById('enroll-msg').textContent = '⚠ Nessun campione acquisito.';
+    document.getElementById('enroll-capture-btn').textContent = '● Avvia cattura'; return; }
+  document.getElementById('enroll-msg').textContent = 'Salvataggio in corso…';
   fetch('/api/enroll/save', {method: 'POST'})
     .then(r => r.json())
     .then(d => {
-      if (d.error) { alert(d.error); return; }
+      if (d.error) { alert(d.error);
+        document.getElementById('enroll-capture-btn').textContent = '● Avvia cattura'; return; }
       enrollReset();
       document.getElementById('enroll-name').value = '';
       loadPersons();
@@ -639,13 +657,17 @@ function enrollSave() {
 }
 
 function enrollCancel() {
+  enrollStopCapture();
   fetch('/api/enroll/cancel', {method: 'POST'}).finally(enrollReset);
 }
 
 function enrollReset() {
+  enrollStopCapture();
+  _enrollInFlight = false; _enrollCount = 0;
   document.getElementById('enroll-idle').classList.remove('hidden');
   document.getElementById('enroll-active').classList.add('hidden');
   document.getElementById('enroll-msg').textContent = '';
+  document.getElementById('enroll-capture-btn').textContent = '● Avvia cattura';
 }
 
 
