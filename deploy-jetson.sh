@@ -13,7 +13,21 @@ cd "$(dirname "$0")"
 
 COMPOSE="docker compose -f docker-compose.jetson.yml --env-file .env.jetson"
 ENV_FILE=".env.jetson"
-EXT_DISK="${EXT_DISK:-/mnt/faceid}"
+
+# EXT_DISK resolution order: explicit env > value persisted in .env.jetson > auto-detect the first
+# REAL external mount. No hardcoded default: a default path that isn't actually a mount silently
+# sends models/DB/sessions to the internal eMMC (happened once — data split across two trees).
+if [ -z "${EXT_DISK:-}" ] && [ -f "$ENV_FILE" ]; then
+  EXT_DISK="$(sed -n 's/^EXT_DISK=//p' "$ENV_FILE" | tail -1)"
+fi
+if [ -z "${EXT_DISK:-}" ]; then
+  for cand in /mnt/* /media/*/*; do
+    [ -d "$cand" ] || continue
+    if [ "$(stat -c %d "$cand" 2>/dev/null)" != "$(stat -c %d "$(dirname "$cand")" 2>/dev/null)" ]; then
+      EXT_DISK="$cand"; break
+    fi
+  done
+fi
 
 # Sub-commands
 case "${1:-up}" in
@@ -27,12 +41,32 @@ esac
 touch "$ENV_FILE"
 grep -q '^BIOMETRIC_SECRET_KEY=' "$ENV_FILE" || \
   echo "BIOMETRIC_SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> "$ENV_FILE"
+# HARD GATE: EXT_DISK must be a REAL mount point, otherwise the bootstrap below would happily
+# create the data tree on the internal eMMC and the app would run on internal storage while
+# looking perfectly healthy (models re-downloaded, a second DB, sessions written to the wrong
+# disk). A directory on / is NOT an external disk: a mount point has a different device id than
+# its parent. Override deliberately with ALLOW_INTERNAL_STORAGE=1.
+_is_mount() {
+  [ -d "$1" ] && [ "$(stat -c %d "$1" 2>/dev/null)" != "$(stat -c %d "$(dirname "$1")" 2>/dev/null)" ]
+}
+if [ -z "${EXT_DISK:-}" ] || ! _is_mount "$EXT_DISK"; then
+  if [ "${ALLOW_INTERNAL_STORAGE:-0}" = "1" ]; then
+    echo "ATTENZIONE: ${EXT_DISK:-(vuoto)} NON e' un disco montato — proseguo su storage interno (ALLOW_INTERNAL_STORAGE=1)." >&2
+    : "${EXT_DISK:?EXT_DISK obbligatorio anche con ALLOW_INTERNAL_STORAGE=1}"
+  else
+    echo "ERRORE: EXT_DISK='${EXT_DISK:-(non impostato)}' non e' un disco esterno montato." >&2
+    echo "        Dati/modelli/sessioni finirebbero sulla eMMC interna. Dischi montati disponibili:" >&2
+    df -h --output=target,size,avail,fstype 2>/dev/null | awk 'NR==1 || $1 ~ /^\/(mnt|media)\//' >&2
+    echo "        Riprova indicando il disco giusto, es.:  EXT_DISK=/mnt/<disco> $0" >&2
+    echo "        (per forzare comunque lo storage interno: ALLOW_INTERNAL_STORAGE=1 $0)" >&2
+    exit 1
+  fi
+fi
+echo "Disco dati: ${EXT_DISK}  ($(df -h --output=avail "$EXT_DISK" 2>/dev/null | tail -1 | tr -d ' ') liberi)"
+
+# Persist the (now validated) disk so the next run needs no flags.
 grep -q '^EXT_DISK=' "$ENV_FILE" && sed -i "s#^EXT_DISK=.*#EXT_DISK=${EXT_DISK}#" "$ENV_FILE" \
   || echo "EXT_DISK=${EXT_DISK}" >> "$ENV_FILE"
-
-if [ ! -d "$EXT_DISK" ]; then
-  echo "ATTENZIONE: disco esterno $EXT_DISK non montato (modelli/engine/dati vanno li')." >&2
-fi
 
 # Bootstrap: le sottocartelle DEVONO esistere prima del primo avvio, altrimenti il symlink
 # /root/.insightface -> /data/models punta nel vuoto e il warm-up modelli crasha.
