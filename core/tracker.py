@@ -32,10 +32,14 @@ def _iou(a: FaceLocation, b: FaceLocation) -> float:
 class FaceTracker:
     """Greedy IoU association with embedding caching and stale-track aging."""
 
-    def __init__(self, iou_thr: float = 0.3, max_age: int = 30):
+    def __init__(self, iou_thr: float = 0.3, max_age: int = 30, reembed_every: int = 0):
         self.iou_thr = iou_thr
         self.max_age = max_age
-        self._tracks: Dict[int, dict] = {}  # tid → {bbox, emb, age}
+        # reembed_every > 0: even a tracked face is re-embedded every N processed frames, so the
+        # match distance/confidence on the overlay refreshes instead of staying frozen on the cached
+        # embedding. 0 = never re-embed a carried face (max throughput, but a static distance).
+        self.reembed_every = reembed_every
+        self._tracks: Dict[int, dict] = {}  # tid → {bbox, emb, age, since}
         self._next = 0
 
     def step(self, locations: List[FaceLocation]) -> List[Tuple[int, Optional[np.ndarray]]]:
@@ -44,6 +48,7 @@ class FaceTracker:
         — `None` means this face must be embedded this frame."""
         for tr in self._tracks.values():
             tr["age"] += 1
+            tr["since"] = tr.get("since", 0) + 1  # processed frames since last embedding
         used = set()
         out: List[Tuple[int, Optional[np.ndarray]]] = []
         for loc in locations:
@@ -57,12 +62,17 @@ class FaceTracker:
             if best_tid is None:
                 self._next += 1
                 best_tid = self._next
-                self._tracks[best_tid] = {"bbox": loc, "emb": None, "age": 0}
+                self._tracks[best_tid] = {"bbox": loc, "emb": None, "age": 0, "since": 0}
             else:
                 self._tracks[best_tid]["bbox"] = loc
                 self._tracks[best_tid]["age"] = 0
             used.add(best_tid)
-            out.append((best_tid, self._tracks[best_tid]["emb"]))
+            tr = self._tracks[best_tid]
+            # Force a periodic re-embed so the distance refreshes: return None (→ pipeline embeds
+            # this face) when the cached embedding is older than reembed_every frames.
+            stale = (self.reembed_every > 0 and tr["emb"] is not None
+                     and tr["since"] >= self.reembed_every)
+            out.append((best_tid, None if stale else tr["emb"]))
         for tid in [t for t, tr in self._tracks.items() if tr["age"] > self.max_age]:
             del self._tracks[tid]
         return out
@@ -70,3 +80,4 @@ class FaceTracker:
     def set_embedding(self, tid: int, emb: np.ndarray) -> None:
         if tid in self._tracks:
             self._tracks[tid]["emb"] = emb
+            self._tracks[tid]["since"] = 0  # fresh embedding → reset the re-embed clock

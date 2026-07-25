@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     opt_det_height: int = 720
     opt_frame_skip: int = 2                   # elabora 1 frame ogni N (ottimizzato)
     opt_tracker: bool = True                  # tracker IoU porta l'identità (salta il re-embed)
+    opt_reembed_every: int = 10               # re-embedda un volto tracciato ogni N frame (0=mai) → la distanza a video si aggiorna
     opt_batch_embed: bool = True              # embedding di tutti i volti del frame in un passo
     trt_engine_cache_dir: str = ""            # vuoto → {data_dir}/engines (disco esterno)
     # Fallback memoria: se onnxruntime r32.7 non libera le arene native al cambio profilo, esci

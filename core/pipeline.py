@@ -356,7 +356,9 @@ class FaceIdPipeline:
             tracker = self._trackers.get(camera_id)
             if tracker is None:
                 from core.tracker import FaceTracker
-                tracker = self._trackers[camera_id] = FaceTracker()
+                tracker = self._trackers[camera_id] = FaceTracker(reembed_every=prof.reembed_every)
+            else:
+                tracker.reembed_every = prof.reembed_every  # live knob (runtime settings change)
             tracked = tracker.step([loc for loc, _ in pairs])
         else:
             tracked = [(None, None)] * len(pairs)

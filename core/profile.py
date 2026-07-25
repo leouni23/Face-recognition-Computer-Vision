@@ -23,6 +23,7 @@ class Profile(NamedTuple):
     det_size: Optional[Tuple[int, int]]  # (w, h) detection downsample, or None = full res
     frame_skip: int                      # process 1 frame every N (>= 1)
     tracker: bool                        # IoU tracker carries identity (skip re-embedding)
+    reembed_every: int                   # re-embed a tracked face every N frames (0=never) → live distance refresh
     batch_embed: bool                    # embed all faces of a frame in one forward pass
     engine_cache_dir: str                # where TensorRT engines are cached (external disk)
 
@@ -45,13 +46,14 @@ def get_profile() -> Profile:
         return Profile(
             name=OPTIMIZED, model_pack=s.opt_model_pack, precision=(s.opt_precision or "fp16").lower(),
             det_size=det, frame_skip=max(1, int(s.opt_frame_skip)),
-            tracker=bool(s.opt_tracker), batch_embed=bool(s.opt_batch_embed),
-            engine_cache_dir=_engine_cache_dir(s),
+            tracker=bool(s.opt_tracker), reembed_every=max(0, int(s.opt_reembed_every)),
+            batch_embed=bool(s.opt_batch_embed), engine_cache_dir=_engine_cache_dir(s),
         )
     # Standard — today's exact behaviour; all OPT_* knobs ignored.
     return Profile(
         name=STANDARD, model_pack="buffalo_l", precision="fp32", det_size=None,
-        frame_skip=1, tracker=False, batch_embed=False, engine_cache_dir=_engine_cache_dir(s),
+        frame_skip=1, tracker=False, reembed_every=0, batch_embed=False,
+        engine_cache_dir=_engine_cache_dir(s),
     )
 
 
