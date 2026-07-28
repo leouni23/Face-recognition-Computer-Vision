@@ -1,7 +1,7 @@
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 try:  # pydantic v2 (x86): pydantic-settings is a separate package
     from pydantic_settings import BaseSettings
@@ -36,6 +36,19 @@ def _load_runtime_env() -> None:
 
 _load_runtime_env()
 
+DET_DIM_MIN, DET_DIM_MAX, DET_DIM_STEP = 320, 1920, 32
+
+
+def snap_det_dim(value) -> int:
+    """Porta un lato dell'input rilevatore al multiplo di 32 più vicino, dentro [320, 1920].
+    SCRFD calcola le griglie di anchor come input // stride (stride fino a 32): un lato non
+    multiplo di 32 disallinea la decodifica dei box rispetto all'output della rete."""
+    try:
+        v = int(round(float(value) / DET_DIM_STEP)) * DET_DIM_STEP
+    except (TypeError, ValueError):
+        v = 640
+    return max(DET_DIM_MIN, min(DET_DIM_MAX, v))
+
 
 class Settings(BaseSettings):
     database_url: str = "postgresql://user:password@localhost:5432/face_id"
@@ -43,7 +56,15 @@ class Settings(BaseSettings):
     camera_sources: str = "0"
     match_threshold: float = 0.5
     det_threshold: float = 0.5   # confidenza minima del rilevatore SCRFD (default InsightFace)
-    min_face_px: int = 80        # scarta volti più bassi di N px (riflessi/specchio, volti lontani)
+    min_face_px: int = 32        # scarta volti più bassi di N px (riflessi/specchio, volti lontani)
+    # Risoluzione dell'input del RILEVATORE (letterbox del frame dentro questo canvas).
+    # Era hardcoded (640, 640): su un 16:9 il 44% del canvas è padding nero e un 1080p arriva
+    # alla rete a 640x360 (det_scale 0.333) → un volto a 3 m finisce sotto il pavimento di
+    # rilevabilità SCRFD (~16-20 px). 1280x736 è 16:9 con entrambi i lati multipli di 32:
+    # VINCOLO OBBLIGATORIO, perché SCRFD genera le griglie di anchor come input // stride
+    # (stride fino a 32) e con lati non multipli di 32 la decodifica sballa.
+    det_input_width: int = 1280
+    det_input_height: int = 736
     use_gpu: bool = True
     web_password: str = ""  # Basic Auth per la Web UI; vuota = nessuna autenticazione (solo localhost!)
     data_retention_days: int = 365
@@ -81,6 +102,11 @@ class Settings(BaseSettings):
     @property
     def cameras(self) -> List[str]:
         return [s.strip() for s in self.camera_sources.split(",")]
+
+    @property
+    def det_input(self) -> Tuple[int, int]:
+        """Risoluzione input del rilevatore, normalizzata (vedi det_input_width)."""
+        return (snap_det_dim(self.det_input_width), snap_det_dim(self.det_input_height))
 
     if _PYDANTIC_V2:
         model_config = {"env_file": ".env"}

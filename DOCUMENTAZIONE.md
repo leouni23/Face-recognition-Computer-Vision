@@ -144,6 +144,44 @@ Usa **InsightFace** con il pacchetto di modelli **buffalo_l** (detection **SCRFD
 - L'inizializzazione del modello è protetta da un lock (più camera-thread potrebbero richiederla in parallelo)
 - Speedup tipico: 5-10× rispetto a CPU
 
+**Portata: da cosa dipende la distanza massima a cui un volto viene rilevato**
+
+SCRFD non lavora sul frame originale: lo **inscrive in letterbox** dentro un canvas di
+dimensione fissa (`DET_INPUT_WIDTH` × `DET_INPUT_HEIGHT`) e ridimensiona i box all'indietro.
+Il fattore di scala è `det_scale = altezza_inscritta / altezza_frame`, quindi un volto alto
+`H` px nel frame arriva alla rete a `H · det_scale` px. Il pavimento di rilevabilità della
+rete è ~16-20 px (stride minimo 8, anchor base 16).
+
+Tre parametri, in cascata, decidono se un volto lontano sopravvive:
+
+| Parametro | Effetto | Sintomo se troppo alto |
+| --- | --- | --- |
+| `DET_INPUT_WIDTH/HEIGHT` | Risoluzione a cui la rete vede il frame | Il volto **non viene mai rilevato** (sotto il pavimento della rete) |
+| `DET_THRESHOLD` | Confidenza minima del box | Volto rilevato a intermittenza (box che lampeggiano) |
+| `MIN_FACE_PX` | Altezza minima **in px del frame originale** | Volto rilevato ma **scartato in silenzio** (nessun box, nessuno "Sconosciuto") |
+
+Fino al 28/07/2026 il canvas era **fisso a 640×640** (hardcoded): su un 1080p in 16:9
+l'immagine ci entra come 640×360 (`det_scale = 0.333`, e il 44 % del canvas è padding nero),
+quindi **un volto sotto ~50 px reali non veniva proprio visto** e tra 50 e 80 px veniva
+scartato da `MIN_FACE_PX=80`. Con una camera grandangolare che inquadra l'intera stanza è
+esattamente il caso di un soggetto a 3 m: da qui il default attuale **1280×736**
+(16:9, lati multipli di 32) e `MIN_FACE_PX=32`.
+
+> **Vincolo:** entrambi i lati devono essere multipli di 32 — SCRFD costruisce le griglie di
+> anchor come `input // stride` con stride fino a 32, e un lato non multiplo disallinea la
+> decodifica dei box. `config.settings.snap_det_dim()` arrotonda e limita a 320–1920.
+
+I tre parametri si tarano **a caldo** dalla barra "Rilevamento" della UI
+(`GET/POST /api/settings/detection` → `core.detector.apply_detection_settings`): nessun
+ricaricamento dei modelli (~9 min sul TX2), i valori vengono persistiti in
+`${DATA_DIR}/runtime.env` e finiscono in `session.json` / `PROTOCOL.md` di ogni validazione.
+Con il profilo optimized, cambiare la risoluzione fa costruire a TensorRT un motore per la
+nuova forma: i primi frame sono lenti, poi resta in cache in `${DATA_DIR}/engines`.
+
+Per misurare quanti pixel è alto un volto alla distanza d'interesse:
+`python3 scripts/diag_face_size.py --camera cam3 --frames 3` (dentro il container) fa lo sweep
+risoluzione × soglia sul frame live e dice **quale dei tre cancelli** sta scartando il volto.
+
 ---
 
 ### 3.3 Riconoscimento — `core/recognizer.py`
@@ -444,7 +482,8 @@ I dati biometrici (embedding facciali) rientrano nella **categoria speciale** ai
 | `CAMERA_SOURCES` | `0` | Indici/URL camere separati da virgola (es. `0,1` o `rtsp://...`) |
 | `MATCH_THRESHOLD` | `0.5` | Soglia cosine distance (più basso = più severo) |
 | `DET_THRESHOLD` | `0.5` | Confidenza minima del rilevatore SCRFD (più alto = meno falsi rilevamenti) |
-| `MIN_FACE_PX` | `80` | Scarta volti più bassi di N px (riflessi specchio, volti lontani) |
+| `MIN_FACE_PX` | `32` | Scarta volti più bassi di N px **del frame a piena risoluzione** (riflessi specchio, volti troppo lontani per essere identificati) |
+| `DET_INPUT_WIDTH` / `DET_INPUT_HEIGHT` | `1280` / `736` | Canvas del rilevatore: **fissa la portata** (vedi §3.2). Lati multipli di 32 (arrotondati automaticamente), range 320–1920 |
 | `USE_GPU` | `true` | Usa CUDA se disponibile |
 | `POSITION_LOG_INTERVAL` | `1.0` | Secondi tra i punti di posizione salvati (per persona/camera) |
 | `DATA_RETENTION_DAYS` | `365` | Giorni di conservazione dati biometrici |

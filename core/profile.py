@@ -60,9 +60,16 @@ def get_profile() -> Profile:
 def profile_summary() -> dict:
     """Self-describing snapshot for session.json / PROTOCOL.md (paper comparability)."""
     p = get_profile()
+    s = get_settings()
     return {
         "profile": p.name, "model_pack": p.model_pack, "precision": p.precision,
+        # det_size = pre-downsample del frame (solo optimized); det_input = risoluzione del
+        # canvas del rilevatore (entrambi i profili). Sono due cose diverse: non confonderle
+        # leggendo le sessioni. Le sessioni precedenti al 28/07/2026 non hanno det_input e
+        # sono state registrate con il vecchio valore fisso 640x640.
         "det_size": list(p.det_size) if p.det_size else None,
+        "det_input": list(s.det_input),
+        "min_face_px": int(s.min_face_px), "det_threshold": float(s.det_threshold),
         "frame_skip": p.frame_skip, "tracker": p.tracker, "batch_embed": p.batch_embed,
     }
 

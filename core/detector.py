@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from loguru import logger
 
-from config.settings import get_settings
+from config.settings import get_settings, snap_det_dim
 from core.profile import get_profile
 
 # On Windows, register CUDA DLL directories installed via pip (nvidia-* packages)
@@ -125,13 +125,73 @@ _warmup_lock = threading.Lock()
 # _build_analyzer. Read by GET /api/settings/profile/status so the UI can verify the requested
 # profile really took effect (green light) instead of trusting settings (buffalo_l incident).
 _loaded_info = {"model_pack": None, "precision": None, "providers": [], "profile": None,
-                "loaded_at": None}
+                "det_input": None, "loaded_at": None}
 _loaded_lock = threading.Lock()
 
 
 def get_loaded_info() -> dict:
     with _loaded_lock:
         return dict(_loaded_info)
+
+
+def get_detection_settings() -> dict:
+    """Parametri di rilevamento richiesti + quelli realmente attivi sull'analyzer caricato.
+    Divergono solo tra la POST di /api/settings/detection e il primo frame successivo."""
+    s = get_settings()
+    out = {
+        "min_face_px": int(s.min_face_px),
+        "det_threshold": float(s.det_threshold),
+        "det_input": list(s.det_input),
+        "live": {},
+    }
+    det_model = getattr(_analyzer, "det_model", None) if _analyzer is not None else None
+    if det_model is not None:
+        size = getattr(det_model, "input_size", None)
+        out["live"] = {
+            "det_threshold": float(getattr(det_model, "det_thresh", 0.0)),
+            "det_input": list(size) if size else None,
+        }
+    return out
+
+
+def apply_detection_settings(min_face_px=None, det_threshold=None, det_input=None) -> dict:
+    """Applica i parametri del rilevatore A CALDO, senza ricostruire l'analyzer (il warm-up
+    costa ~9 min sul TX2).
+
+    `min_face_px` è letto a ogni frame da `_faces_to_data` / `detect_faces` via get_settings(),
+    quindi basta aggiornare l'oggetto Settings (che è un singleton lru_cache). `det_thresh` e
+    `input_size` vivono sul modello SCRFD e si possono riassegnare: il grafo ONNX ha input
+    dinamico (è `prepare()` a fissare input_size, non il modello), quindi la nuova forma è
+    valida senza ricaricare nulla.
+
+    ATTENZIONE (profilo optimized): sotto TensorRT una forma di input mai vista fa costruire un
+    nuovo motore ai primi frame — lento una volta sola, poi in cache in {data_dir}/engines.
+
+    Ritorna lo stato risultante (come get_detection_settings()).
+    """
+    s = get_settings()
+    if min_face_px is not None:
+        s.min_face_px = max(0, int(min_face_px))
+    if det_threshold is not None:
+        s.det_threshold = float(det_threshold)
+    if det_input is not None:
+        s.det_input_width = snap_det_dim(det_input[0])
+        s.det_input_height = snap_det_dim(det_input[1])
+
+    det_model = getattr(_analyzer, "det_model", None) if _analyzer is not None else None
+    if det_model is not None:
+        if det_threshold is not None:
+            det_model.det_thresh = float(s.det_threshold)
+        if det_input is not None:
+            det_model.input_size = s.det_input
+        with _loaded_lock:
+            _loaded_info["det_input"] = list(s.det_input)
+    logger.info(
+        f"[Detection] min_face_px={s.min_face_px} det_thresh={s.det_threshold} "
+        f"det_input={s.det_input[0]}x{s.det_input[1]} "
+        f"(applicato a caldo: {det_model is not None})"
+    )
+    return get_detection_settings()
 
 
 def get_warmup_state() -> dict:
@@ -325,7 +385,7 @@ def _build_analyzer():
                          daemon=True).start()
         instance.prepare(
             ctx_id=0 if want_gpu else -1,
-            det_size=(640, 640),
+            det_size=settings.det_input,   # era hardcoded (640, 640) → 1080p visto a 640x360
             det_thresh=settings.det_threshold,
         )
         prepare_s = time.perf_counter() - prep_start
@@ -345,16 +405,31 @@ def _build_analyzer():
             f"{sorted(active)}); inferenza su CPU. Verifica le librerie CUDA 12 / "
             "cuDNN 9 e i driver NVIDIA (--gpus all nel container)."
         )
+    det_input = settings.det_input
     logger.info(
         f"InsightFace: modelli pronti (provider attivi={sorted(active)}, "
-        f"det_thresh={settings.det_threshold}, min_face_px={settings.min_face_px})"
+        f"det_input={det_input[0]}x{det_input[1]}, det_thresh={settings.det_threshold}, "
+        f"min_face_px={settings.min_face_px})"
     )
+    # Su un frame landscape è la LARGHEZZA a fissare il fattore di scala del letterbox
+    # (new_width = det_input[0]), quindi il confronto utile è width-vs-width: l'altezza del
+    # canvas è in parte padding e darebbe falsi allarmi (es. OPT_DET 1280x720 vs input 1280x736).
+    if prof.det_size and prof.det_size[0] < det_input[0]:
+        # Il pre-downsample del profilo optimized butta via risoluzione PRIMA del rilevatore:
+        # oltre questa soglia non fa più risparmiare nulla al rilevatore (che comunque rimpicciolisce
+        # al suo canvas) e diventa solo un tetto alla portata, oltre a ridurre il crop di embedding.
+        logger.warning(
+            f"OPT_DET {prof.det_size[0]}x{prof.det_size[1]} è più piccolo dell'input rilevatore "
+            f"{det_input[0]}x{det_input[1]}: il pre-downsample limita la portata. "
+            "Alzare OPT_DET_WIDTH/OPT_DET_HEIGHT (o metterli a 0 = piena risoluzione)."
+        )
     # Ground truth of what is ACTUALLY loaded (semaforo UI): the buffalo_l lab incident happened
     # because settings said one thing and nothing showed what the analyzer really ran.
     with _loaded_lock:
         _loaded_info.update({
             "model_pack": prof.model_pack, "precision": prof.precision,
             "providers": sorted(active), "profile": prof.name,
+            "det_input": list(det_input),
             "loaded_at": datetime.now().isoformat(),
         })
     return instance

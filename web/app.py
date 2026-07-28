@@ -14,11 +14,12 @@ import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
 from loguru import logger
 
-from config.settings import get_settings
+from config.settings import get_settings, snap_det_dim
 from core.camera import probe_source
 from core.camera_manager import camera_manager
 from core.detector import (
-    detect_and_encode, get_loaded_info, get_warmup_state, reset_for_profile_change,
+    apply_detection_settings, detect_and_encode, get_detection_settings, get_loaded_info,
+    get_warmup_state, reset_for_profile_change,
 )
 from core.profile import OPTIMIZED, STANDARD, get_profile, profile_summary
 from core.geometry import compute_homography, solve_polar_calibration
@@ -943,6 +944,59 @@ def set_match_threshold():
     persisted = _persist_env("MATCH_THRESHOLD", f"{value}")
     logger.info(f"[Settings] MATCH_THRESHOLD = {value} (persistita nel .env: {persisted})")
     return jsonify({"value": value, "persisted": persisted})
+
+
+@app.route("/api/settings/detection", methods=["GET", "POST"])
+def settings_detection():
+    """Parametri di portata del rilevatore, tarabili DAL VIVO (nessun riavvio: il warm-up dei
+    modelli costa ~9 min sul TX2).
+
+    - `min_face_px`: altezza minima del volto, in px del frame a piena risoluzione.
+    - `det_threshold`: confidenza minima SCRFD.
+    - `det_input`: [w, h] del canvas del rilevatore. Il frame ci viene inscritto in letterbox,
+      quindi questo valore fissa la portata: con 640x640 un 1080p arriva alla rete a 640x360
+      (det_scale 0.333) e un volto sotto ~50 px reali non viene proprio visto. I lati vengono
+      arrotondati a multipli di 32 (vincolo delle griglie di anchor SCRFD).
+    """
+    if request.method == "GET":
+        return jsonify(get_detection_settings())
+    data = request.get_json(silent=True) or {}
+    min_face_px = det_threshold = det_input = None
+    try:
+        if data.get("min_face_px") is not None:
+            min_face_px = int(data["min_face_px"])
+            if not (0 <= min_face_px <= 400):
+                return jsonify({"error": "min_face_px fuori range (0–400)"}), 400
+        if data.get("det_threshold") is not None:
+            det_threshold = float(data["det_threshold"])
+            if not (0.05 <= det_threshold <= 0.95):
+                return jsonify({"error": "det_threshold fuori range (0.05–0.95)"}), 400
+        if data.get("det_input") is not None:
+            w, h = data["det_input"]
+            det_input = (snap_det_dim(w), snap_det_dim(h))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Valori non validi"}), 400
+    if min_face_px is None and det_threshold is None and det_input is None:
+        return jsonify({"error": "Nessun parametro da applicare"}), 400
+
+    before = get_detection_settings()
+    state = apply_detection_settings(min_face_px=min_face_px, det_threshold=det_threshold,
+                                     det_input=det_input)
+    persisted = True
+    if min_face_px is not None:
+        persisted &= _persist_env("MIN_FACE_PX", str(state["min_face_px"]))
+    if det_threshold is not None:
+        persisted &= _persist_env("DET_THRESHOLD", str(state["det_threshold"]))
+    if det_input is not None:
+        persisted &= _persist_env("DET_INPUT_WIDTH", str(state["det_input"][0]))
+        persisted &= _persist_env("DET_INPUT_HEIGHT", str(state["det_input"][1]))
+    warning = None
+    if det_input is not None and det_input != tuple(before["det_input"]) \
+            and get_profile().is_optimized:
+        warning = ("Profilo optimized: TensorRT deve costruire il motore per la nuova "
+                   "risoluzione: i primi frame saranno lenti, poi resta in cache.")
+    logger.info(f"[Settings] detection {state} (persistito: {persisted})")
+    return jsonify(dict(state, persisted=persisted, warning=warning))
 
 
 @app.route("/api/settings/profile", methods=["GET", "POST"])

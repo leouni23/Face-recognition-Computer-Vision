@@ -68,6 +68,28 @@
     <span id="prof-light" title="Stato profilo" style="display:inline-block;width:.65rem;height:.65rem;border-radius:9999px;background:#6b7280"></span>
     <span id="prof-verified" class="text-gray-500"></span>
     <span id="prof-detail" class="text-gray-500"></span>
+    <!-- Portata del rilevatore: si applica a caldo, senza ricaricare i modelli (~9 min) -->
+    <span class="text-gray-500 uppercase tracking-widest font-semibold border-l border-gray-800 pl-3"
+          title="Quanto lontano arriva il rilevatore. Si applica subito, senza ricaricare i modelli.">Rilevamento</span>
+    <label class="text-gray-500" title="Risoluzione del canvas del rilevatore: il frame ci viene inscritto in letterbox. Più alta = volti lontani più piccoli restano visibili, ma il rilevamento costa di più.">
+      input <select id="det-input" class="bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-gray-200">
+        <option value="640x640">640×640 (legacy)</option>
+        <option value="960x544">960×544</option>
+        <option value="1280x736">1280×736</option>
+        <option value="1600x896">1600×896</option>
+        <option value="1920x1088">1920×1088</option>
+      </select>
+    </label>
+    <label class="text-gray-500" title="Altezza minima del volto, in pixel del frame a piena risoluzione: sotto questa soglia il volto viene scartato (riflessi, volti troppo lontani per essere identificati).">
+      min volto <input id="det-minpx" type="number" min="0" max="400" step="4"
+        class="w-16 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-gray-200"> px
+    </label>
+    <label class="text-gray-500" title="Confidenza minima del rilevatore SCRFD. Abbassarla fa comparire volti incerti (più portata, più falsi positivi).">
+      conf <input id="det-thr" type="number" min="0.05" max="0.95" step="0.05"
+        class="w-16 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-gray-200">
+    </label>
+    <button onclick="applyDetection()" class="px-3 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700">Applica</button>
+    <span id="det-note" class="text-gray-500"></span>
     <button onclick="openCamModal()" class="ml-auto px-3 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700">🎥 Gestione videocamere</button>
     <span id="cam-sources" class="text-gray-600"></span>
   </div>
@@ -81,9 +103,10 @@
         const sel = p.profile===k;
         b.className = `px-3 py-1 ${sel?on:off}` + (k==='optimized-tx2'?' border-l border-gray-700':'');
       });
-      const det = p.profile==='optimized-tx2'
+      const det = (p.profile==='optimized-tx2'
           ? `pack ${p.model_pack} · ${p.precision} · det ${p.det_size?p.det_size.join('×'):'full'} · skip ${p.frame_skip} · tracker ${p.tracker?'on':'off'} · batch ${p.batch_embed?'on':'off'}`
-          : `${p.model_pack} · FP32 · comportamento standard`;
+          : `${p.model_pack} · FP32 · comportamento standard`)
+          + (p.det_input ? ` · input ${p.det_input.join('×')}` : '');
       const d = document.getElementById('prof-detail');
       // Feed = sempre frame camera raw; det_size tocca solo il rilevatore (non l'immagine mostrata).
       d.title = 'Il feed video è il frame grezzo della camera. det = risoluzione passata SOLO al rilevatore. tracker on = identità riportata tra frame senza ri-embedding (embed_ms~0).';
@@ -92,6 +115,37 @@
           ? ` · <b class="text-amber-400">⚠ registrazione necessaria per questo profilo (${esc(p.model_pack)})</b>` : '');
     }
     function loadProfile(){ fetch('/api/settings/profile').then(r=>r.json()).then(renderProfile).catch(()=>{}); }
+    // ── Rilevamento: knob a caldo (nessun ricaricamento modelli) ──
+    function renderDetection(d){
+      const sel=document.getElementById('det-input'), wh=(d.det_input||[]).join('x');
+      if (wh && !Array.from(sel.options).some(o=>o.value===wh)) sel.add(new Option(wh.replace('x','×'), wh));
+      sel.value = wh;
+      document.getElementById('det-minpx').value = d.min_face_px;
+      document.getElementById('det-thr').value = d.det_threshold;
+      // `live` = ciò che l'analyzer sta davvero usando: diverge solo tra la POST e il frame dopo.
+      const live=d.live||{}, note=document.getElementById('det-note');
+      const liveWh=(live.det_input||[]).join('x');
+      note.textContent = (liveWh && liveWh!==wh) ? `⚠ attivo ${liveWh.replace('x','×')}` : '';
+      note.className = note.textContent ? 'text-amber-400' : 'text-gray-500';
+    }
+    function loadDetection(){ fetch('/api/settings/detection').then(r=>r.json()).then(renderDetection).catch(()=>{}); }
+    function applyDetection(){
+      const [w,h]=document.getElementById('det-input').value.split('x').map(Number);
+      const body={det_input:[w,h],
+                  min_face_px:Number(document.getElementById('det-minpx').value),
+                  det_threshold:Number(document.getElementById('det-thr').value)};
+      const note=document.getElementById('det-note');
+      note.textContent='applico…'; note.className='text-gray-500';
+      fetch('/api/settings/detection',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+        .then(r=>r.json()).then(d=>{
+          if(d.error){ note.textContent=d.error; note.className='text-red-400'; return; }
+          renderDetection(d);
+          if(d.warning){ note.textContent='⏳ '+d.warning; note.className='text-amber-400'; }
+          else { note.textContent='✓ applicato'; note.className='text-emerald-400';
+                 setTimeout(loadDetection, 3000); }   // rileggi lo stato reale dall'analyzer
+          loadProfile();
+        }).catch(()=>{ note.textContent='errore di rete'; note.className='text-red-400'; });
+    }
     function setProfile(v){
       if (v === currentProfile) return;   // già attivo → nessun rebuild inutile
       const label = v==='optimized-tx2' ? 'Optimized-TX2 (buffalo_s · TensorRT/FP16)' : 'Standard (buffalo_l · FP32)';
@@ -128,6 +182,7 @@
     pollProfileStatus(); setInterval(pollProfileStatus, 2000);
     refreshCamSummary();
     loadProfile();
+    loadDetection();
 
     // ── Warm-up progress bar (F3) ──
     function pollWarmup(){

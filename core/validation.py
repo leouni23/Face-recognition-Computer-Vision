@@ -292,12 +292,19 @@ def _configured_cameras() -> List[str]:
 def _perf_line(perf: Optional[dict]) -> str:
     """One-line human summary of the optimization parameters for PROTOCOL.md §2."""
     perf = perf or {}
+    det_in = perf.get("det_input")
+    # Portata del rilevatore: vale per ENTRAMBI i profili e determina a che distanza un volto
+    # è ancora rilevabile → va nel protocollo, altrimenti due sessioni non sono confrontabili.
+    reach = (f", input rilevatore {'×'.join(map(str, det_in))}" if det_in else "") + \
+            (f", min_face_px {perf['min_face_px']}" if perf.get("min_face_px") is not None else "") + \
+            (f", det_thresh {perf['det_threshold']}" if perf.get("det_threshold") is not None else "")
     if perf.get("profile") != "optimized-tx2":
-        return f"pack {perf.get('model_pack', 'buffalo_l')}, FP32, comportamento standard"
+        return f"pack {perf.get('model_pack', 'buffalo_l')}, FP32, comportamento standard" + reach
     det = perf.get("det_size")
     return (f"pack {perf.get('model_pack')}, {perf.get('precision')}, "
             f"det {('×'.join(map(str, det)) if det else 'full')}, frame-skip {perf.get('frame_skip')}, "
-            f"tracker {'on' if perf.get('tracker') else 'off'}, batch {'on' if perf.get('batch_embed') else 'off'}")
+            f"tracker {'on' if perf.get('tracker') else 'off'}, "
+            f"batch {'on' if perf.get('batch_embed') else 'off'}" + reach)
 
 
 def build_protocol_md(meta: dict) -> str:
