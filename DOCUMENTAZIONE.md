@@ -182,6 +182,9 @@ Per misurare quanti pixel è alto un volto alla distanza d'interesse:
 `python3 scripts/diag_face_size.py --camera cam3 --frames 3` (dentro il container) fa lo sweep
 risoluzione × soglia sul frame live e dice **quale dei tre cancelli** sta scartando il volto.
 
+> **Misure sul campo** (portata reale per modello, e perché alzare la risoluzione *non* alza la
+> confidence del riconoscimento): §11.12.
+
 ---
 
 ### 3.3 Riconoscimento — `core/recognizer.py`
@@ -843,6 +846,68 @@ Una **validazione (campagna)** è il contenitore dell'esperimento:
   registro mostrano **solo** chi ha un embedding per il pack attivo (gli altri sono elencati a
   parte come "registrati su un altro modello"), così dopo uno switch non resta nessun residuo
   fantasma del modello precedente.
+
+---
+
+### 11.12 Portata a distanza: misure sul campo (28-29/07/2026)
+
+Prove sulla camera del laboratorio (Axis 1080p, montata in alto, inquadra l'intera stanza —
+`cam3`), soggetto singolo, stessa camminata ripetuta: **15 s a 3 m → indietro lentamente fino in
+fondo alla sala → 15 s lì → avanti fino a 2 m → 15 s lì**. Ground truth dai `position_logs`
+(altezza bbox in px del frame originale) e dallo stream eventi.
+
+**Il difetto che ha originato le prove.** Il canvas del rilevatore era fisso a 640×640 (vedi
+§3.2): oltre i ~3 m nessun volto veniva rilevato, con **entrambi** i profili. Le 17 sessioni di
+validazione registrate fino ad allora erano tutte primi piani (bbox 225–490 px), quindi il
+problema non poteva emergere prima.
+
+**Quanto è grande un volto in questa sala** (misurato, non stimato):
+
+| Posizione | altezza bbox |
+| --- | --- |
+| 2 m | 140–158 px |
+| 3 m | 79–86 px |
+| fondo sala | **34–41 px** |
+
+Con la vecchia configurazione, **il 46 % dei campioni di una camminata stava sotto
+`MIN_FACE_PX=80`** e i più lontani erano sotto il pavimento di rilevabilità del canvas 640×640:
+invisibili, non "scartati".
+
+**Confronto dei due modelli a parità di `det_input` 1600×896:**
+
+| | buffalo_l (standard, FP32/CUDA) | buffalo_s (optimized, TRT-FP16) |
+| --- | --- | --- |
+| 3 m (volto ~83 px) | conf **0.79** | conf **0.70** |
+| fondo sala (34–41 px) | **identificato in continuità**, conf 0.51–0.59 | **rilevato ma NON identificato** — 38 s di "Sconosciuto" |
+| 2 m (~145 px) | conf 0.78 | conf 0.80 |
+| costo | **3,6 fps**, detect_ms 280 ms | **16,8 fps**, detect_ms 50 ms |
+
+Durante i 38 s di buco, `perf.cameras.cam3.faces` è rimasto **1.00**: il volto era rilevato, ma
+la distanza coseno non è mai scesa sotto `MATCH_THRESHOLD`. Il riaggancio è avvenuto a ~52 px.
+
+**Conclusione operativa — due grandezze distinte, da non confondere:**
+
+- **portata di RILEVAMENTO** → la governa `DET_INPUT_WIDTH/HEIGHT`. Risolta: a 1600×896 un volto
+  di 34 px viene visto.
+- **portata di IDENTIFICAZIONE** → la governa il **modello** (e i template). Misurata:
+  **buffalo_l fino a ~34 px, buffalo_s fino a ~47–52 px.**
+
+**Alzare `det_input` NON alza la confidence.** A parità di dimensione del volto (~83 px) buffalo_s
+dà ~0.70 sia a 1280×736 sia a 1600×896: il crop che va ad ArcFace contiene gli stessi pixel reali:
+un canvas più grande serve a *trovare* il volto, non a *descriverlo* meglio. Per guadagnare
+confidence a distanza le leve sono il modello (buffalo_l) o un **template iscritto a distanza**,
+così la galleria contiene un embedding alla scala reale d'uso.
+
+**`OPT_DET` è un tetto nascosto.** Nel profilo optimized il pre-downsample avviene *prima* del
+rilevatore: alzare `DET_INPUT_*` senza alzare `OPT_DET_WIDTH/HEIGHT` non produce alcun effetto
+(SCRFD si ritroverebbe a ingrandire un frame già ridotto). Un warning nei log lo intercetta.
+A differenza dei tre parametri di §3.2, **`OPT_DET_*` non è tarabile a caldo**: vive solo in
+`runtime.env` e richiede un riavvio.
+
+**Persistenza verificata su tre riavvii consecutivi:** `PERFORMANCE_PROFILE`, `DET_INPUT_WIDTH/
+HEIGHT`, `MIN_FACE_PX`, `DET_THRESHOLD`, `OPT_DET_WIDTH/HEIGHT` tornano da `${DATA_DIR}/runtime.env`
+senza interventi. Nota: dopo un cambio di `det_input` sul profilo optimized, TensorRT ricostruisce
+il motore per la nuova forma ai primi frame (~1,5 min, poi in cache).
 
 ---
 
