@@ -32,6 +32,33 @@ _settings = get_settings()
 _FOURCC = cv2.VideoWriter_fourcc(*"mp4v")
 _NOMINAL_FPS = 15.0  # playback fps; review syncs by frame_index, not wall-clock
 
+# Preferred codec for NEW recordings: H.264 ("avc1") plays natively in browsers, while the legacy
+# mp4v (MPEG-4 Part 2) does not and has to be transcoded before review. The encoder isn't
+# guaranteed on every build, so we verify the writer actually opened and fall back to mp4v —
+# a failed codec must never cost a recording.
+_PREFERRED_FOURCC = "avc1"
+_codec_choice = None  # cached after the first successful open: ("avc1"|"mp4v")
+
+
+def _open_writer(path: Path, w: int, h: int):
+    """VideoWriter on the best available codec (avc1 → mp4v), verified with isOpened()."""
+    global _codec_choice
+    order = [_codec_choice] if _codec_choice else [_PREFERRED_FOURCC, "mp4v"]
+    for name in order:
+        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*name), _NOMINAL_FPS, (w, h))
+        if writer.isOpened():
+            if _codec_choice != name:
+                _codec_choice = name
+                if name != _PREFERRED_FOURCC:
+                    logger.info("[Validation] Codec H.264 non disponibile: registro in {} "
+                                "(la revisione transcodifica al volo)".format(name))
+                else:
+                    logger.info("[Validation] Registrazione video in H.264 (avc1)")
+            return writer
+        writer.release()
+    # Both failed: return the mp4v writer anyway so the caller's existing error path handles it.
+    return cv2.VideoWriter(str(path), _FOURCC, _NOMINAL_FPS, (w, h))
+
 # Active destination root for validation artifacts (may be an external disk chosen by the
 # operator). The biometric DB always stays on internal storage, separate from this.
 _dest_root: Optional[Path] = None
@@ -448,7 +475,7 @@ class _CameraSink:
         self._seg_first_ts = int(round(ts * 1000))
         self._frames_in_seg = 0
         self._cur_file = f"cam_{self._cam}_{self._seg_no:03d}.mp4"
-        self._writer = cv2.VideoWriter(str(self._dir / self._cur_file), _FOURCC, _NOMINAL_FPS, (w, h))
+        self._writer = _open_writer(self._dir / self._cur_file, w, h)
 
     def _close_segment(self) -> None:
         if self._writer is None:
