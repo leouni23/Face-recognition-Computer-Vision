@@ -145,6 +145,9 @@ def events_stream():
 
 @app.route("/api/enroll/start", methods=["POST"])
 def enroll_start():
+    blocked = _archive_guard()
+    if blocked:
+        return blocked
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
@@ -463,17 +466,29 @@ def _session_dir(session_id: str):
     directly under the root (legacy flat) or one level down inside a validation group."""
     if "/" in session_id or "\\" in session_id or session_id in ("", ".", ".."):
         return None
-    root = validation_root().resolve()
-    if not root.is_dir():
-        return None
-    candidates = [root]
-    for d in root.iterdir():
-        if d.is_dir():
-            candidates.append(d)
-    for parent in candidates:
-        target = (parent / session_id).resolve()
-        if target.is_dir() and (target / "session.json").is_file() and root in target.parents:
-            return target
+    # Search the REVIEW root first (offline archive) and then the recording root, so every review
+    # endpoint (session/detections/labels/metrics/video/frame) works on the copied experiment
+    # without duplicating any of them.
+    from core.review import review_root
+    roots, seen = [], set()
+    for r in (review_root(), validation_root()):
+        try:
+            rr = r.resolve()
+        except OSError:
+            continue
+        if rr.is_dir() and str(rr) not in seen:
+            seen.add(str(rr))
+            roots.append(rr)
+    for root in roots:
+        candidates = [root]
+        try:
+            candidates.extend(d for d in root.iterdir() if d.is_dir())
+        except OSError:
+            continue
+        for parent in candidates:
+            target = (parent / session_id).resolve()
+            if target.is_dir() and (target / "session.json").is_file() and root in target.parents:
+                return target
     return None
 
 
@@ -518,6 +533,9 @@ def _resolve_trial_subjects(subjects):
 
 @app.route("/api/validation/start", methods=["POST"])
 def validation_start():
+    blocked = _archive_guard()
+    if blocked:
+        return blocked
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     if name and not _NAME_RE.match(name):
@@ -694,6 +712,205 @@ def validation_groups():
     return jsonify(out)
 
 
+# ── Offline review: data-source root, archive mode, exclusions ────────────────────
+# The review reads its own root (usually a 1:1 copy of the experiment on the workstation) and
+# never mutates it: exclusions/verdicts go to review_state.json, a NEW file per campaign.
+
+def _archive_guard():
+    """409 when a write endpoint is hit in archive (read-only) mode. Returns None otherwise."""
+    from core.review import archive_mode
+    if archive_mode()["archive"]:
+        return jsonify({"error": "Modalità archivio: sola lettura. Disattivala per registrare, "
+                                 "iscrivere volti o cambiare profilo."}), 409
+    return None
+
+
+@app.route("/api/review/root", methods=["GET", "POST"])
+def review_root_api():
+    from core.review import review_root, set_review_root, validate_root
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        path = (data.get("path") or "").strip()
+        if data.get("validate_only"):
+            return jsonify(validate_root(path))
+        info = validate_root(path) if path else {"ok": True}
+        if path and not info.get("ok"):
+            return jsonify(info), 400
+        return jsonify(set_review_root(path))
+    return jsonify(validate_root(str(review_root())))
+
+
+@app.route("/api/review/mode", methods=["GET", "POST"])
+def review_mode_api():
+    from core.review import archive_mode, set_archive_override
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        val = data.get("archive")           # true / false / null (= automatico)
+        return jsonify(set_archive_override(None if val is None else bool(val)))
+    return jsonify(archive_mode())
+
+
+@app.route("/api/review/campaigns")
+def review_campaigns_api():
+    from core.review import list_review_campaigns
+    return jsonify(list_review_campaigns())
+
+
+@app.route("/api/review/<folder>/sessions")
+def review_sessions_api(folder: str):
+    from core.review import review_sessions
+    return jsonify(review_sessions(folder))
+
+
+@app.route("/api/review/<folder>/state")
+def review_state_api(folder: str):
+    from core.review import campaign_dir, load_state
+    if campaign_dir(folder) is None:
+        return jsonify({"error": "Campagna non trovata"}), 404
+    return jsonify(load_state(folder))
+
+
+@app.route("/api/review/<folder>/sessions", methods=["POST"])
+def review_sessions_update_api(folder: str):
+    """Batch include/exclude (the wrong repetitions come in blocks) + per-session verdict/notes."""
+    from core.review import campaign_dir, update_sessions
+    if campaign_dir(folder) is None:
+        return jsonify({"error": "Campagna non trovata"}), 404
+    data = request.get_json(silent=True) or {}
+    ids = data.get("session_ids") or ([data["session_id"]] if data.get("session_id") else [])
+    if not ids:
+        return jsonify({"error": "Nessuna sessione indicata"}), 400
+    try:
+        state = update_sessions(
+            folder, ids,
+            excluded=data.get("excluded"), reason=data.get("reason"),
+            reviewed=data.get("reviewed"), verdict=data.get("verdict"), notes=data.get("notes"))
+    except (ValueError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"updated": ids, "state": state})
+
+
+def _video_files(session_dir: Path, camera_id: str):
+    """Recorded segments for a camera, in order (segments avoid FAT32's 4 GB limit)."""
+    segs = _segments_index(session_dir, camera_id)
+    if segs:
+        return [session_dir / "video" / s["file"] for s in segs]
+    legacy = session_dir / "video" / "cam_{}.mp4".format(camera_id)
+    return [legacy] if legacy.is_file() else []
+
+
+@app.route("/api/review/video/<session_id>/<camera_id>")
+def review_video(session_id: str, camera_id: str):
+    """Serve the H.264 transcode of a segment (browsers can't decode the recorded mp4v).
+    send_file(conditional=True) handles HTTP Range, so seeking works."""
+    from flask import send_file
+    from core.transcode import ensure_h264
+    d = _session_dir(session_id)
+    if d is None:
+        return jsonify({"error": "Sessione non trovata"}), 404
+    files = _video_files(d, camera_id)
+    if not files:
+        return jsonify({"error": "Video non trovato"}), 404
+    seg = request.args.get("seg", type=int) or 0
+    src = files[seg] if 0 <= seg < len(files) else files[0]
+    res = ensure_h264(src)
+    if not res.get("ready"):
+        return jsonify({"error": res.get("error", "Transcodifica non disponibile")}), 503
+    return send_file(res["path"], mimetype="video/mp4", conditional=True)
+
+
+@app.route("/api/review/video/<session_id>/<camera_id>/status")
+def review_video_status(session_id: str, camera_id: str):
+    from core.transcode import ffmpeg_path, status
+    d = _session_dir(session_id)
+    if d is None:
+        return jsonify({"error": "Sessione non trovata"}), 404
+    files = _video_files(d, camera_id)
+    if not files:
+        return jsonify({"state": "no_video", "ready": False, "segments": 0})
+    st = status(files[0])
+    st["segments"] = len(files)
+    st["ffmpeg"] = bool(ffmpeg_path())
+    return jsonify(st)
+
+
+_transcode_progress: dict = {}
+
+
+@app.route("/api/review/<folder>/transcode", methods=["POST"])
+def review_transcode_campaign(folder: str):
+    """Pre-transcode every video of a campaign in the background (poll .../transcode/status)."""
+    from core.review import campaign_dir, review_sessions
+    from core.transcode import ffmpeg_path, transcode_many
+    if campaign_dir(folder) is None:
+        return jsonify({"error": "Campagna non trovata"}), 404
+    if not ffmpeg_path():
+        return jsonify({"error": "ffmpeg non disponibile"}), 503
+    if _transcode_progress.get("running"):
+        return jsonify({"error": "Transcodifica già in corso", "progress": _transcode_progress}), 409
+    sources = []
+    for s in review_sessions(folder):
+        sd = Path(s["dir"])
+        try:
+            meta = json.loads((sd / "session.json").read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+        for cam in (meta.get("cameras") or []):
+            sources.extend(_video_files(sd, str(cam)))
+    _transcode_progress.clear()
+    _transcode_progress.update({"folder": folder, "total": len(sources), "done": 0,
+                                "errors": [], "running": True})
+    threading.Thread(target=transcode_many, args=(sources, _transcode_progress),
+                     daemon=True, name="review-transcode").start()
+    return jsonify(dict(_transcode_progress))
+
+
+@app.route("/api/review/transcode/status")
+def review_transcode_status():
+    return jsonify(dict(_transcode_progress) or {"running": False})
+
+
+@app.route("/api/review/<folder>/export", methods=["POST"])
+def review_export_api(folder: str):
+    """"Concludi validazione": metrics + CSV + REPORT.md for the INCLUDED sessions only."""
+    from core.export_review import export_campaign
+    from core.review import campaign_dir
+    if campaign_dir(folder) is None:
+        return jsonify({"error": "Campagna non trovata"}), 404
+    try:
+        return jsonify(export_campaign(folder))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": "Export fallito: {}".format(exc)}), 500
+
+
+@app.route("/api/review/<folder>/compare")
+def review_compare_api(folder: str):
+    """Standard-vs-Optimized on the campaign, excluded sessions filtered out."""
+    from core.compare import compare
+    from core.review import campaign_dir, excluded_everywhere, review_root
+    if campaign_dir(folder) is None:
+        return jsonify({"error": "Campagna non trovata"}), 404
+    result = compare(root=review_root(), by_preset=request.args.get("by_preset") in ("1", "true"),
+                     exclude=excluded_everywhere())
+    result["sessions"] = [s for s in result.get("sessions", []) if s.get("group") == folder]
+    return jsonify(result)
+
+
+@app.route("/api/review/<folder>/flag", methods=["POST"])
+def review_flag_campaign_api(folder: str):
+    from core.review import campaign_dir, flag_campaign
+    if campaign_dir(folder) is None:
+        return jsonify({"error": "Campagna non trovata"}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(flag_campaign(folder, excluded=data.get("excluded"),
+                                     reason=data.get("reason"), is_test=data.get("is_test")))
+    except (ValueError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 # ── Validation campaigns (experiment containers; provaN restarts inside each) ──────
 
 def _campaigns():
@@ -716,6 +933,9 @@ def validation_campaigns():
 def validation_campaign_start():
     """Open a campaign. 409 if one is already open — the operator closes it explicitly (no
     implicit close), so sessions can never land in the wrong container."""
+    blocked = _archive_guard()
+    if blocked:
+        return blocked
     from core.validation import start_campaign
     data = request.get_json(silent=True) or {}
     try:
@@ -730,6 +950,9 @@ def validation_campaign_start():
 
 @app.route("/api/validation/campaign/close", methods=["POST"])
 def validation_campaign_close():
+    blocked = _archive_guard()
+    if blocked:
+        return blocked
     from core.validation import close_campaign
     if validation_manager.is_active():
         return jsonify({"error": "Ferma prima la sessione in corso"}), 409
@@ -740,6 +963,9 @@ def validation_campaign_close():
 def validation_campaign_delete(folder: str):
     """Delete a TEST campaign and its sessions. Non-test → 403 (real data is never deletable
     from the UI)."""
+    blocked = _archive_guard()
+    if blocked:
+        return blocked
     import shutil
     from core.validation import active_campaign, close_campaign, validation_root
     if "/" in folder or "\\" in folder or folder in ("", ".", ".."):
@@ -1004,6 +1230,10 @@ def settings_profile():
     """Get or set the performance profile (Standard vs Optimized-TX2). On POST: persist
     PERFORMANCE_PROFILE, apply it live, and rebuild the analyzer (new model pack / providers)
     + drop optimized per-camera state — no full restart needed."""
+    if request.method == "POST":
+        blocked = _archive_guard()
+        if blocked:
+            return blocked
     if request.method == "GET":
         summary = profile_summary()
         with get_session() as session:

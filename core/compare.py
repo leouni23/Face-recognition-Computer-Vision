@@ -140,11 +140,18 @@ def _slim(m: Optional[dict]) -> dict:
     }
 
 
-def compare(root: Optional[Path] = None, by_preset: bool = False) -> dict:
+def compare(root: Optional[Path] = None, by_preset: bool = False,
+            exclude: Optional[set] = None) -> dict:
     """Group sessions by profile (and optionally preset), recompute combined metrics per group,
-    and emit Standard-vs-Optimized deltas. Pure offline; no camera."""
+    and emit Standard-vs-Optimized deltas. Pure offline; no camera.
+
+    `exclude` = session ids removed from the analysis (wrong repetitions / excluded campaigns
+    flagged during the offline review). They stay on disk; they just don't count."""
     root = root or validation_root()
     sessions = scan_sessions(root)
+    excluded_ids = set(exclude or ())
+    if excluded_ids:
+        sessions = [s for s in sessions if s["session_id"] not in excluded_ids]
     groups: Dict[str, List[dict]] = defaultdict(list)
     for s in sessions:
         groups[s["profile"]].append(s)
@@ -168,6 +175,7 @@ def compare(root: Optional[Path] = None, by_preset: bool = False) -> dict:
     return {
         "root": str(root),
         "n_sessions": len(sessions),
+        "n_excluded": len(excluded_ids),
         "profiles": by_profile,
         "deltas_optimized_minus_standard": deltas,
         "sessions": sessions,
