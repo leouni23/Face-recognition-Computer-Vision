@@ -909,6 +909,58 @@ HEIGHT`, `MIN_FACE_PX`, `DET_THRESHOLD`, `OPT_DET_WIDTH/HEIGHT` tornano da `${DA
 senza interventi. Nota: dopo un cambio di `det_input` sul profilo optimized, TensorRT ricostruisce
 il motore per la nuova forma ai primi frame (~1,5 min, poi in cache).
 
+### 11.13 Revisione offline: archivio, esclusione sessioni, player H.264, export
+
+A esperimento concluso i dati si copiano 1:1 dal device a una workstation e si rivedono lì. La
+copia **non viene mai modificata**: esclusioni, verdetti e note finiscono in file **nuovi**.
+
+- **Sorgente dati (barra in cima a `/validation`)**: campo per la root della copia + *Valida e usa*
+  → "✓ cartella valida: N campagne · M sessioni". La scelta è persistita in
+  `~/.config/faceid-review.json` (letto **on-demand**, mai al boot). La root di revisione è
+  indipendente da quella di registrazione.
+- **Modalità archivio (sola lettura)**: automatica quando la root di revisione non è quella di
+  registrazione **oppure** non ci sono camere connesse; override manuale (`automatico/ON/OFF`).
+  Badge **"ARCHIVIO — sola lettura"**; avvio sessione, enroll, cambio profilo e gestione campagne
+  rispondono **409**, mentre revisione, etichettatura, metriche, confronto ed export restano attivi.
+- **Campagna in revisione**: elenco di tutte le campagne della root (nome, sessioni, escluse,
+  profili), **ordinate per data discendente con la più recente preselezionata**. Una campagna può
+  essere marcata **esclusa** (resta su disco, sparisce da metriche/export).
+- **Esclusione sessioni** (il punto centrale): tabella con nome sessione (che **contiene la GT
+  dichiarata**), profilo, tipo, n. detection, n. label e stato (da rivedere / rivista / esclusa);
+  filtri rapidi; **selezione multipla** + *Escludi/Includi selezionate* con motivo. Lo stato vive in
+  `review_state.json` **accanto a `campaign.json`** (scrittura atomica, merge per chiave):
+  `{sessions: {<id>: {excluded, reason, reviewed, verdict, notes, updated_at}}}`. `session.json`,
+  `detections.jsonl` e i video restano byte-identici.
+- **Player H.264**: i video registrati usano `mp4v`, che **i browser non decodificano**. Il server
+  ne produce una versione H.264 **on-demand** (`ffmpeg -c:v libx264 -pix_fmt yuv420p -movflags
+  +faststart`) in cache sotto `~/.cache/faceid-review/` — mai dentro la copia — servita con
+  **HTTP Range** (seeking reale). Bottone **Pre-transcodifica** per convertire l'intera campagna in
+  background. Senza ffmpeg: messaggio esplicito e fallback ai frame JPEG decodificati lato server.
+  Le registrazioni **nuove** provano `avc1` e ricadono su `mp4v` se l'encoder manca (verifica
+  `isOpened()`, log esplicito).
+- **Revisione a tre riquadri**: video (i riquadri con nome/confidenza sono già disegnati) ·
+  **GT dichiarata** (nome sessione + soggetti, soglia, pack, profilo, mappa posti) · **rilevato dal
+  software** (timeline eventi con identità, distanza coseno, candidati). Sync bidirezionale
+  tabella↔video via `frame_index`, velocità 0.5×/1×/2×, frame-by-frame. Scorciatoie: `C` GT
+  corretta, `X` mismatch (+ chi c'era davvero), `E` escludi sessione, `↑/↓` sessione
+  precedente/successiva, `←/→` frame, `Spazio` play. In UI è esplicito che **si conferma chi c'era
+  davvero, non se il modello ha indovinato**.
+- **"✅ Concludi validazione"** → `export/<campagna>_<timestamp>/` dentro la root dati, sulle sole
+  sessioni **incluse**: `metrics_<profilo>.json`, `det_<profilo>.csv`, `cmc_<profilo>.csv`,
+  `comparison.json|csv`, `telemetry.json`, `review_state.json`, `MANIFEST.json` (root, campagna,
+  commit git, incluse/escluse con motivo) e **`REPORT.md`** con le tabelle pronte per il paper:
+  ogni percentuale con **denominatore e IC di Wilson 95%**, delta Optimized−Standard e la sezione
+  **limiti dichiarati** (regola del 30, regola del 3, galleria piccola). Export riproducibile:
+  stesso input → stesso output.
+
+**Avvio della revisione offline sulla workstation:**
+
+```bash
+cd ~/Face-recognition-Computer-Vision
+python main.py --web --host 127.0.0.1        # nessuna camera necessaria
+# http://127.0.0.1:8000/validation → barra "Sorgente dati" → percorso della copia → Valida e usa
+```
+
 ---
 
 ## 12. Bot Telegram
