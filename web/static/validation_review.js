@@ -44,6 +44,7 @@ function loadSession() {
     document.getElementById('no-video-note').classList.toggle('hidden', !noVideo);
     document.getElementById('sess-meta').textContent =
       `${manifest.session_type || ''} · ${noVideo ? 'senza video' : 'video'} · ${gallery.length} iscritti · soglia ${threshold ?? '—'} · ${manifest.platform || ''}`;
+    renderGtPanel(manifest);
     detections = dets;
     t0ms = dets.reduce((m, d) => Math.min(m, d.timestamp_ms ?? Infinity), Infinity);
     if (!isFinite(t0ms)) t0ms = null;
@@ -62,6 +63,7 @@ function switchCamera() {
   segments = buildSegments(items);
   setFrame(segments.length ? segments[0].first : 0);
   renderTimeline();
+  setupVideo();   // prova il player H.264 per questa camera (fallback ai frame JPEG)
 }
 
 // ── Events (one continuous appearance per face slot) ───────────────────────────
@@ -106,13 +108,98 @@ function currentSegment() {
       || segments.filter(s => s.first <= curIndex).slice(-1)[0] || segments[0] || null;
 }
 
+// ── Pannello "verità a terra dichiarata" ─────────────────────────────────────
+// Il NOME della sessione la contiene già (soggetti + preset + profilo + provaN): lo mostro in
+// evidenza accanto al riepilogo del manifest, così il verdetto si dà in pochi secondi.
+function renderGtPanel(manifest) {
+  const nameEl = document.getElementById('gt-session-name');
+  const sumEl = document.getElementById('gt-summary');
+  if (nameEl) nameEl.textContent = sessionId || '—';
+  if (!sumEl) return;
+  const subs = (manifest.subjects_full || []).map(s =>
+    `${esc(s.label)} — ${esc(s.name || '?')}${s.person_id != null ? ' (#' + s.person_id + ')' : ''}`).join(', ');
+  const perf = manifest.performance || {};
+  const bits = [];
+  if (subs) bits.push(`<b>soggetti dichiarati:</b> ${subs}`);
+  else if (gallery.length) bits.push(`<b>iscritti:</b> ${gallery.map(g => esc(g.name)).join(', ')}`);
+  if (manifest.campaign_name) bits.push(`validazione: ${esc(manifest.campaign_name)}`);
+  bits.push(`soglia ${threshold ?? '—'}`);
+  if (perf.model_pack) bits.push(`pack ${esc(perf.model_pack)}${perf.precision ? ' · ' + esc(perf.precision) : ''}`);
+  if (manifest.profile) bits.push(`profilo ${esc(manifest.profile)}`);
+  if (manifest.seating && manifest.seating.length) {
+    bits.push(`<b>mappa posti:</b> ` + manifest.seating.map(p =>
+      `${p.seat}:${esc(p.label || '?')}`).join(' · '));
+  }
+  sumEl.innerHTML = bits.join(' · ');
+}
+
+// ── H.264 player (transcodifica on-demand) ───────────────────────────────────
+// I video registrati usano mp4v: i browser NON lo decodificano in <video>. Il server ne serve
+// una versione H.264 (cache fuori dalla copia dati); se ffmpeg manca si ricade sui frame JPEG.
+let useVideo = false, videoEl = null, syncingFromVideo = false;
+
+function videoMode(on) {
+  useVideo = !!on;
+  const vw = document.getElementById('video-wrap');
+  const fw = document.getElementById('frame-wrap');
+  if (vw) vw.classList.toggle('hidden', !useVideo);
+  if (fw) fw.classList.toggle('hidden', useVideo);
+}
+
+function setupVideo() {
+  videoMode(false);
+  const status = document.getElementById('video-status');
+  if (status) { status.classList.add('hidden'); status.textContent = ''; }
+  if (!sessionId || noVideo || curCam == null) return;
+  fetch(`/api/review/video/${encodeURIComponent(sessionId)}/${encodeURIComponent(curCam)}/status`)
+    .then(r => r.json()).then(st => {
+      if (st.state === 'no_video') return;
+      if (!st.ffmpeg) {
+        if (status) {
+          status.classList.remove('hidden');
+          status.textContent = 'ffmpeg non disponibile: il video registrato (mp4v) non è riproducibile nel browser. '
+            + 'Revisione con i frame decodificati lato server (↔ per scorrere). Installa ffmpeg per il player fluido.';
+        }
+        return;
+      }
+      if (status && !st.ready) {
+        status.classList.remove('hidden');
+        status.textContent = 'Conversione del video in H.264 in corso (solo la prima volta)…';
+      }
+      videoEl = document.getElementById('review-video');
+      if (!videoEl) return;
+      videoEl.onerror = () => {
+        videoMode(false);
+        if (status) { status.classList.remove('hidden'); status.textContent = 'Video non riproducibile: uso i frame decodificati.'; }
+      };
+      videoEl.onloadedmetadata = () => {
+        videoMode(true);
+        if (status) status.classList.add('hidden');
+        videoEl.playbackRate = +(document.getElementById('play-rate') || {}).value || 1;
+        setFrame(curIndex);
+      };
+      videoEl.ontimeupdate = () => {          // video → tabella (sync bidirezionale)
+        if (!useVideo || syncingFromVideo) return;
+        const idx = Math.round(videoEl.currentTime * FPS);
+        if (Math.abs(idx - curIndex) >= 1) { syncingFromVideo = true; setFrame(idx); syncingFromVideo = false; }
+      };
+      videoEl.src = `/api/review/video/${encodeURIComponent(sessionId)}/${encodeURIComponent(curCam)}`;
+      videoEl.load();
+    }).catch(() => {});
+}
+
+function setPlayRate(r) { if (videoEl) videoEl.playbackRate = r; }
+
 // ── Frame player ─────────────────────────────────────────────────────────────
 function setFrame(i) {
   if (!sessionId || curCam == null) return;
   curIndex = Math.max(0, Math.min(maxIndex, i));
-  if (!noVideo) {
+  if (!noVideo && !useVideo) {
     document.getElementById('frame-img').src =
       `/api/validation/${encodeURIComponent(sessionId)}/frame/${encodeURIComponent(curCam)}/${curIndex}`;
+  } else if (useVideo && videoEl && !syncingFromVideo) {
+    const t = curIndex / FPS;                 // tabella/slider → video
+    if (Math.abs(videoEl.currentTime - t) > 1 / FPS) videoEl.currentTime = t;
   }
   document.getElementById('frame-slider').value = curIndex;
   document.getElementById('frame-info').textContent = `frame ${curIndex} / ${maxIndex} · ${vtime(curIndex)}`;
@@ -121,13 +208,49 @@ function setFrame(i) {
   document.querySelectorAll('#rows tr').forEach(tr =>
     tr.classList.toggle('cur', seg && Number(tr.dataset.first) === seg.first && Number(tr.dataset.face) === seg.faceId));
 }
-function playPause() { playTimer ? stopPlay() : startPlay(); }
+function playPause() {
+  if (useVideo && videoEl) {
+    if (videoEl.paused) { videoEl.play(); document.getElementById('play-btn').textContent = '⏸ Pausa'; }
+    else { videoEl.pause(); document.getElementById('play-btn').textContent = '▶ Play'; }
+    return;
+  }
+  playTimer ? stopPlay() : startPlay();
+}
 function startPlay() {
   if (playTimer) return;
   document.getElementById('play-btn').textContent = '⏸ Pausa';
   playTimer = setInterval(() => { if (curIndex >= maxIndex) { stopPlay(); return; } setFrame(curIndex + 1); }, 1000 / FPS);
 }
-function stopPlay() { if (playTimer) { clearInterval(playTimer); playTimer = null; } document.getElementById('play-btn').textContent = '▶ Play'; }
+function stopPlay() {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  if (useVideo && videoEl && !videoEl.paused) videoEl.pause();
+  document.getElementById('play-btn').textContent = '▶ Play';
+}
+
+// ── Verdetto di sessione (C / X / E) ─────────────────────────────────────────
+// Confermiamo CHI c'era davvero nel video; gli errori del modello sono il dato da misurare.
+function verdictMsg(txt, cls) {
+  const el = document.getElementById('verdict-msg');
+  if (el) { el.className = 'text-xs ' + (cls || 'text-gray-500'); el.textContent = txt; }
+}
+function verdictOk() {
+  if (!sessionId || typeof setSessionVerdict !== 'function') return;
+  setSessionVerdict(sessionId, 'gt_ok', '').then(() => verdictMsg('✓ verità a terra confermata', 'text-emerald-400'));
+}
+function verdictMismatch() {
+  if (!sessionId || typeof setSessionVerdict !== 'function') return;
+  const who = prompt('Chi c\'era DAVVERO nel video? (nome, o vuoto per "sconosciuto")', '');
+  if (who === null) return;
+  setSessionVerdict(sessionId, 'mismatch', who || 'sconosciuto')
+    .then(() => verdictMsg('✗ mismatch annotato: ' + (who || 'sconosciuto'), 'text-amber-400'));
+}
+function verdictExclude() {
+  if (!sessionId || typeof excludeCurrentSession !== 'function') return;
+  const reason = prompt('Motivo dell\'esclusione:', 'ripetizione errata');
+  if (reason === null) return;
+  excludeCurrentSession(sessionId, reason);
+  verdictMsg('🚫 sessione esclusa: ' + reason, 'text-amber-400');
+}
 function gotoEvent(dir) {
   stopPlay(); if (!segments.length) return;
   const cur = currentSegment(); let next;
@@ -194,6 +317,17 @@ document.addEventListener('keydown', e => {
   if (/input|select|textarea/i.test(e.target.tagName)) return;
   if (e.key === 'ArrowRight') { e.preventDefault(); stopPlay(); setFrame(curIndex + 1); return; }
   if (e.key === 'ArrowLeft')  { e.preventDefault(); stopPlay(); setFrame(curIndex - 1); return; }
+  if (e.key === ' ') { e.preventDefault(); playPause(); return; }
+  // Verdetto rapido di sessione + navigazione fra sessioni (revisione offline)
+  if (e.key === 'c' || e.key === 'C') { e.preventDefault(); verdictOk(); return; }
+  if (e.key === 'x' || e.key === 'X') { e.preventDefault(); verdictMismatch(); return; }
+  if (e.key === 'e' || e.key === 'E') { e.preventDefault(); verdictExclude(); return; }
+  if (e.key === 'ArrowDown' || e.key === ']') {
+    if (typeof stepReviewSession === 'function') { e.preventDefault(); stepReviewSession(1); } return;
+  }
+  if (e.key === 'ArrowUp' || e.key === '[') {
+    if (typeof stepReviewSession === 'function') { e.preventDefault(); stepReviewSession(-1); } return;
+  }
   if (e.key === '0') { e.preventDefault(); assignTruth(null); return; }
   if (/[1-9]/.test(e.key)) { const g = gallery[Number(e.key) - 1]; if (g) { e.preventDefault(); assignTruth(g.id); } }
 });
