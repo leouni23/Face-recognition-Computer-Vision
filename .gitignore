@@ -43,3 +43,30 @@ data/
 
 # Jetson deploy secrets/config
 .env.jetson
+
+# ── Dati di validazione / biometrici: MAI su un repo pubblico ────────────────────
+# data/ è già ignorata, ma la root della revisione offline è scegliibile dall'operatore
+# e potrebbe cadere dentro il working tree: queste regole valgono ovunque nel repo.
+validation/
+# export "Concludi validazione" (metriche + report della campagna)
+export/
+campaign.json
+review_state.json
+.active_campaign.json
+session.json
+# detections.jsonl / labels.jsonl / runs.jsonl
+*.jsonl
+PROTOCOL.md
+
+# Media registrati (volti riconoscibili) e modelli/embedding
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.onnx
+*.npy
+*.pkl
+
+# Cache/stato locale della revisione offline
+.cache/
+faceid-review.json
