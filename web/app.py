@@ -898,6 +898,34 @@ def review_compare_api(folder: str):
     return jsonify(result)
 
 
+@app.route("/api/review/<folder>/recovery")
+def review_recovery_preview_api(folder: str):
+    """Preview (never writes): which sessions a recovery would confirm and which it would exclude,
+    split per profile, plus the guard verdict."""
+    from core.review import campaign_dir, recovery_preview
+    if campaign_dir(folder) is None:
+        return jsonify({"error": "Campagna non trovata"}), 404
+    return jsonify(recovery_preview(folder))
+
+
+@app.route("/api/review/<folder>/recovery", methods=["POST"])
+def review_recovery_apply_api(folder: str):
+    """Apply the recovery. Requires an explicit {"confirm": true} — the preview is mandatory."""
+    from core.review import campaign_dir, recovery_apply
+    if campaign_dir(folder) is None:
+        return jsonify({"error": "Campagna non trovata"}), 404
+    data = request.get_json(silent=True) or {}
+    if not data.get("confirm"):
+        return jsonify({"error": "Conferma esplicita richiesta: invia {\"confirm\": true} "
+                                 "dopo aver letto l'anteprima"}), 400
+    try:
+        return jsonify(recovery_apply(folder))
+    except ValueError as exc:            # guard tripped → nothing was written
+        return jsonify({"error": str(exc)}), 409
+    except (RuntimeError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/review/<folder>/flag", methods=["POST"])
 def review_flag_campaign_api(folder: str):
     from core.review import campaign_dir, flag_campaign

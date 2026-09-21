@@ -103,8 +103,8 @@ function loadReviewSessions() {
   const camp = currentCampaign();
   const cb = document.getElementById('camp-excluded');
   if (cb) cb.checked = !!(camp && camp.excluded);
-  if (!reviewCampaign) { reviewSessions = []; renderReviewSessions(); return; }
-  fetch(`/api/review/${encodeURIComponent(reviewCampaign)}/sessions`).then(r => r.json()).then(list => {
+  if (!reviewCampaign) { reviewSessions = []; renderReviewSessions(); return Promise.resolve(); }
+  return fetch(`/api/review/${encodeURIComponent(reviewCampaign)}/sessions`).then(r => r.json()).then(list => {
     reviewSessions = list || [];
     const pf = document.getElementById('f-profile');
     if (pf) {
@@ -128,58 +128,139 @@ function filteredSessions() {
 
 function sessionStatusCell(s) {
   if (s.excluded) return `<span class="text-amber-400">🚫 esclusa</span>${s.reason ? ' <span class="text-gray-600">' + esc(s.reason) + '</span>' : ''}`;
-  if (s.reviewed) return '<span class="text-emerald-400">✓ rivista</span>';
+  if (s.reviewed) return '<span class="text-emerald-400">✓ confermata</span>';
   return '<span class="text-gray-500">⚠ da rivedere</span>';
+}
+
+// L'esperimento è stato fatto prima con un modello e poi con l'altro: la revisione va per blocchi.
+// STANDARD prima, OPTIMIZED poi; ogni sezione ha conteggi, "seleziona tutto" e azioni PROPRIE.
+const PROFILE_ORDER = ['standard', 'optimized-tx2'];
+const PROFILE_LABEL = {'standard': 'STANDARD', 'optimized-tx2': 'OPTIMIZED-TX2'};
+let collapsedProfiles = {};
+
+function profileOf(s) {
+  if (s.profile) return s.profile;                      // dal manifest session.json
+  return /_optTX2/i.test(s.session_id) ? 'optimized-tx2' : 'standard';   // fallback dal nome
+}
+
+function profileGroups() {
+  const rows = filteredSessions();
+  const groups = {};
+  rows.forEach(s => { (groups[profileOf(s)] = groups[profileOf(s)] || []).push(s); });
+  const keys = PROFILE_ORDER.filter(p => groups[p]);
+  Object.keys(groups).sort().forEach(p => { if (keys.indexOf(p) < 0) keys.push(p); });
+  return keys.map(p => ({profile: p, rows: groups[p]}));
+}
+
+function countsFor(list) {
+  const excluded = list.filter(s => s.excluded).length;
+  const confirmed = list.filter(s => !s.excluded && s.reviewed).length;
+  return {total: list.length, todo: list.length - excluded - confirmed, confirmed, excluded};
 }
 
 function renderReviewSessions() {
   const box = document.getElementById('review-session-list');
   if (!box) return;
-  const rows = filteredSessions();
+  const all = countsFor(reviewSessions);
   const counts = document.getElementById('sess-counts');
-  if (counts) {
-    const inc = reviewSessions.filter(s => !s.excluded).length;
-    counts.textContent = `${inc} incluse / ${reviewSessions.length - inc} escluse`;
-  }
-  if (!rows.length) { box.innerHTML = '<p class="text-gray-600 py-2">Nessuna sessione con questi filtri.</p>'; return; }
-  box.innerHTML = `<table class="w-full text-left">
-    <thead class="text-gray-500"><tr>
-      <th class="py-1 pr-2"><input type="checkbox" onchange="selectAllSessions(this.checked)" class="accent-emerald-500"></th>
-      <th class="py-1 pr-2">sessione (verità a terra dichiarata)</th>
-      <th class="py-1 px-2">profilo</th><th class="py-1 px-2">tipo</th>
-      <th class="py-1 px-2 text-right">det</th><th class="py-1 px-2 text-right">label</th>
-      <th class="py-1 px-2">stato</th>
-    </tr></thead><tbody>` +
-    rows.map(s => `<tr class="border-t border-gray-800/60 hover:bg-gray-800/40 ${s.excluded ? 'opacity-60' : ''}">
-      <td class="py-1 pr-2"><input type="checkbox" class="sess-cb accent-emerald-500" value="${esc(s.session_id)}"></td>
-      <td class="py-1 pr-2"><button onclick="openReviewSession('${esc(s.session_id)}')" class="text-left hover:text-emerald-300 font-mono">${esc(s.session_id)}</button></td>
-      <td class="py-1 px-2">${esc(s.profile || '')}</td>
-      <td class="py-1 px-2">${s.session_type === 'common' ? 'gruppo' : 'singola'}</td>
-      <td class="py-1 px-2 text-right tabular-nums">${s.n_detections}</td>
-      <td class="py-1 px-2 text-right tabular-nums">${s.n_labels}</td>
-      <td class="py-1 px-2">${sessionStatusCell(s)}</td>
-    </tr>`).join('') + '</tbody></table>';
+  if (counts) counts.textContent =
+    `${all.todo} da rivedere / ${all.confirmed} confermate / ${all.excluded} escluse`;
+  const groups = profileGroups();
+  if (!groups.length) { box.innerHTML = '<p class="text-gray-600 py-2">Nessuna sessione con questi filtri.</p>'; return; }
+  box.innerHTML = groups.map(g => {
+    const c = countsFor(g.rows);
+    const open = !collapsedProfiles[g.profile];
+    const pid = g.profile.replace(/[^a-z0-9]/gi, '');
+    return `
+    <section class="mb-4 border border-gray-800 rounded-xl overflow-hidden" data-profile="${esc(g.profile)}">
+      <div class="flex flex-wrap items-center gap-2 px-3 py-2 bg-gray-950 cursor-pointer" onclick="toggleProfile('${esc(g.profile)}')">
+        <span class="text-gray-400">${open ? '▼' : '▶'}</span>
+        <span class="font-semibold text-sm">${esc(PROFILE_LABEL[g.profile] || g.profile)}</span>
+        <span class="text-[11px] text-gray-500">${c.total} sessioni ·
+          <b class="${c.todo ? 'text-amber-400' : 'text-gray-600'}">${c.todo} da rivedere</b> /
+          <b class="text-emerald-400">${c.confirmed} confermate</b> /
+          <b class="text-gray-400">${c.excluded} escluse</b></span>
+      </div>
+      <div class="${open ? '' : 'hidden'}">
+        <div class="overflow-x-auto"><table class="w-full text-left">
+          <thead class="text-gray-500"><tr>
+            <th class="py-1 px-2"><input type="checkbox" class="accent-emerald-500" onchange="selectAllInProfile('${esc(g.profile)}', this.checked)" title="seleziona tutto (solo ${esc(g.profile)})"></th>
+            <th class="py-1 pr-2">sessione (verità a terra dichiarata)</th>
+            <th class="py-1 px-2">tipo</th>
+            <th class="py-1 px-2 text-right">det</th><th class="py-1 px-2 text-right">label</th>
+            <th class="py-1 px-2">stato</th>
+          </tr></thead><tbody>` +
+          g.rows.map(s => `<tr class="border-t border-gray-800/60 hover:bg-gray-800/40 ${s.excluded ? 'opacity-60' : ''}">
+            <td class="py-1 px-2"><input type="checkbox" class="sess-cb accent-emerald-500" data-profile="${esc(g.profile)}" value="${esc(s.session_id)}"></td>
+            <td class="py-1 pr-2"><button onclick="openReviewSession('${esc(s.session_id)}')" class="text-left hover:text-emerald-300 font-mono">${esc(s.session_id)}</button></td>
+            <td class="py-1 px-2">${s.session_type === 'common' ? 'gruppo' : 'singola'}</td>
+            <td class="py-1 px-2 text-right tabular-nums">${s.n_detections}</td>
+            <td class="py-1 px-2 text-right tabular-nums">${s.n_labels}</td>
+            <td class="py-1 px-2">${sessionStatusCell(s)}</td>
+          </tr>`).join('') + `</tbody></table></div>
+        <div class="flex flex-wrap items-center gap-2 px-3 py-2 border-t border-gray-800/60 bg-gray-900/50">
+          <input id="reason-${pid}" class="fld flex-1 min-w-[9rem] text-xs" placeholder="motivo (es. ripetizione errata)" />
+          <button onclick="bulkAction('${esc(g.profile)}','exclude')" class="px-2.5 py-1 rounded-lg bg-amber-700 hover:bg-amber-600 text-xs font-semibold">🚫 Escludi selezionate</button>
+          <button onclick="bulkAction('${esc(g.profile)}','confirm')" class="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-xs font-semibold">✓ Conferma selezionate come valide</button>
+          <button onclick="bulkAction('${esc(g.profile)}','reset')" class="px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-xs">↺ Annulla revisione</button>
+          <span id="msg-${pid}" class="text-xs text-gray-500"></span>
+        </div>
+      </div>
+    </section>`;
+  }).join('');
 }
 
-function selectAllSessions(checked) {
-  document.querySelectorAll('.sess-cb').forEach(cb => { cb.checked = checked; });
+function toggleProfile(profile) {
+  collapsedProfiles[profile] = !collapsedProfiles[profile];
+  renderReviewSessions();
 }
 
-function selectedSessionIds() {
-  return [...document.querySelectorAll('.sess-cb')].filter(cb => cb.checked).map(cb => cb.value);
+// "Seleziona tutto" agisce SOLO dentro la sua sezione, mai sull'altro profilo.
+function selectAllInProfile(profile, checked) {
+  document.querySelectorAll(`.sess-cb[data-profile="${profile}"]`).forEach(cb => { cb.checked = checked; });
 }
 
-function bulkExclude(excluded) {
-  const ids = selectedSessionIds();
-  if (!ids.length) { alert('Seleziona almeno una sessione.'); return; }
-  const reason = document.getElementById('excl-reason').value.trim();
+function selectedSessionIds(profile) {
+  const sel = profile ? `.sess-cb[data-profile="${profile}"]` : '.sess-cb';
+  return [...document.querySelectorAll(sel)].filter(cb => cb.checked).map(cb => cb.value);
+}
+
+// Tre azioni dal significato inequivocabile. "Conferma" scrive reviewed:true — senza quello
+// l'operazione sarebbe un no-op (era esattamente il bug che ha fatto perdere due ore di lavoro).
+const BULK = {
+  exclude: {body: r => ({excluded: true, reviewed: true, reason: r || 'esclusa in revisione'}),
+            done: n => `🚫 ${n} sessioni escluse`},
+  confirm: {body: () => ({excluded: false, reviewed: true, reason: ''}),
+            done: n => `✓ ${n} sessioni confermate valide`},
+  reset:   {body: () => ({excluded: false, reviewed: false, reason: ''}),
+            done: n => `↺ revisione annullata per ${n} sessioni`},
+};
+
+function bulkAction(profile, action) {
+  const pid = profile.replace(/[^a-z0-9]/gi, '');
+  const msg = document.getElementById('msg-' + pid);
+  const ids = selectedSessionIds(profile);
+  const setMsg = (t, cls) => { if (msg) { msg.className = 'text-xs ' + (cls || 'text-gray-500'); msg.textContent = t; } };
+  if (!ids.length) { setMsg('Seleziona almeno una sessione in questa sezione.', 'text-amber-400'); return; }
+  const spec = BULK[action];
+  const reasonEl = document.getElementById('reason-' + pid);
+  const body = Object.assign({session_ids: ids}, spec.body(reasonEl ? reasonEl.value.trim() : ''));
+  setMsg('salvataggio…');
   fetch(`/api/review/${encodeURIComponent(reviewCampaign)}/sessions`,
-        {method:'POST', headers:{'Content-Type':'application/json'},
-         body: JSON.stringify({session_ids: ids, excluded: !!excluded, reason: excluded ? reason : ''})})
+        {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
     .then(r => r.json().then(d => ({s:r.status, d}))).then(({s, d}) => {
-      if (s >= 400) { alert(d.error || 'Errore'); return; }
-      loadReviewSessions(); loadReviewCampaigns();
-    }).catch(() => alert('Errore di rete.'));
+      if (s >= 400) { setMsg('✕ ' + (d.error || 'Errore'), 'text-red-400'); return; }
+      const before = countsFor(reviewSessions.filter(x => profileOf(x) === profile)).todo;
+      loadReviewSessions().then(() => {
+        const after = countsFor(reviewSessions.filter(x => profileOf(x) === profile)).todo;
+        const el = document.getElementById('msg-' + pid);
+        if (el) {
+          el.className = 'text-xs text-emerald-400';
+          el.textContent = `${spec.done(ids.length)} · "da rivedere" ${before} → ${after}`;
+        }
+      });
+      loadReviewCampaigns();
+    }).catch(() => setMsg('Errore di rete.', 'text-red-400'));
 }
 
 // Esclusione rapida della sessione aperta nel player (scorciatoia E)
@@ -201,32 +282,109 @@ function setSessionVerdict(sessionId, verdict, notes) {
     .then(() => { loadReviewSessions(); }).catch(() => {});
 }
 
-// Apre la sessione nel player esistente (validation_review.js)
+// ── Modale di revisione ──────────────────────────────────────────────────────
+// Il pannello si apre SOPRA la lista: niente scrollIntoView, così la posizione nella lista e le
+// checkbox restano dove sono. Aprire un'altra sessione a modale aperta ne cambia solo il contenuto.
+let modalOpen = false;
+
 function openReviewSession(sid) {
   const sel = document.getElementById('session-sel');
-  if (sel) {
-    if (![...sel.options].some(o => o.value === sid)) {
-      const o = document.createElement('option'); o.value = sid; o.textContent = sid; sel.appendChild(o);
-    }
-    sel.value = sid;
-    if (typeof loadSession === 'function') loadSession();
-    const host = document.getElementById('gt-review-section');
-    if (host) {
-      const det = host.closest('details');
-      if (det) det.open = true;                     // la revisione è in un toggle chiuso di default
-      host.scrollIntoView({behavior: 'smooth', block: 'start'});
-    }
+  if (!sel) return;
+  if (![...sel.options].some(o => o.value === sid)) {
+    const o = document.createElement('option'); o.value = sid; o.textContent = sid; sel.appendChild(o);
   }
+  sel.value = sid;
+  if (typeof loadSession === 'function') loadSession();
+  showReviewModal(sid);
 }
 
-// Sessione precedente/successiva (scorciatoie ↑/↓)
+function showReviewModal(sid) {
+  const ov = document.getElementById('review-modal');
+  const host = document.getElementById('gt-review-section');
+  const slot = document.getElementById('review-modal-body');
+  if (!ov || !host || !slot) return;
+  if (!modalOpen) {
+    const det = host.closest('details');
+    if (det) det.open = true;          // la sezione vive in un toggle chiuso di default
+    slot.appendChild(host);            // sposto il pannello dentro la modale (stesso nodo: stato intatto)
+    ov.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+    modalOpen = true;
+  }
+  const t = document.getElementById('review-modal-title');
+  if (t) t.textContent = sid || '';
+}
+
+function closeReviewModal() {
+  const ov = document.getElementById('review-modal');
+  const host = document.getElementById('gt-review-section');
+  // La casa del pannello è il toggle di Configurazione (dove l'init lo sposta); se non c'è,
+  // il contenitore originale della pagina.
+  const home = document.getElementById('gt-review-host') || document.getElementById('gt-review-home');
+  if (!ov || !modalOpen) return;
+  if (host && home) home.appendChild(host);   // rimetto il pannello al suo posto
+  ov.classList.add('hidden');
+  document.body.style.overflow = '';
+  modalOpen = false;
+  if (typeof stopPlay === 'function') stopPlay();
+}
+
+// Sessione precedente/successiva SOLO dentro il gruppo di profilo di quella aperta (↑/↓)
 function stepReviewSession(dir) {
-  const list = filteredSessions();
-  if (!list.length) return;
   const cur = document.getElementById('session-sel');
-  const idx = list.findIndex(s => s.session_id === (cur ? cur.value : ''));
+  const curId = cur ? cur.value : '';
+  const curSession = reviewSessions.find(s => s.session_id === curId);
+  const prof = curSession ? profileOf(curSession) : null;
+  const list = filteredSessions().filter(s => !prof || profileOf(s) === prof);
+  if (!list.length) return;
+  const idx = list.findIndex(s => s.session_id === curId);
   const next = list[Math.max(0, Math.min(list.length - 1, (idx < 0 ? 0 : idx + dir)))];
-  if (next) openReviewSession(next.session_id);
+  if (next && next.session_id !== curId) openReviewSession(next.session_id);
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && modalOpen) { e.preventDefault(); closeReviewModal(); }
+});
+
+// ── Recupero della selezione precedente ──────────────────────────────────────
+// La vecchia "Includi selezionate" non scriveva `reviewed`, quindi era un no-op: ma ogni sessione
+// toccata ha comunque lasciato un record nello stato. Questo lo riconverte in inclusione/esclusione
+// reale — anteprima obbligatoria, backup automatico, e due guardie contro stati ambigui.
+function recoverSelection() {
+  if (!reviewCampaign) { alert('Nessuna campagna selezionata.'); return; }
+  fetch(`/api/review/${encodeURIComponent(reviewCampaign)}/recovery`)
+    .then(r => r.json().then(d => ({s: r.status, d}))).then(({s, d}) => {
+      if (s >= 400) { alert(d.error || 'Errore'); return; }
+      if (!d.can_apply) {
+        alert('Recupero non applicabile.\n\n' + d.blocked_reason +
+              `\n\nSessioni: ${d.n_sessions} · toccate: ${d.n_touched} · mai toccate: ${d.n_untouched}`);
+        return;
+      }
+      const perProf = Object.keys(d.per_profile).sort().map(p =>
+        `  • ${p}: ${d.per_profile[p].n_touched} confermate, ${d.per_profile[p].n_untouched} da escludere`).join('\n');
+      const stamps = (d.touch_timestamps || []).map(t => `  • ${t.at.replace('T', ' ')} → ${t.n} sessioni`).join('\n');
+      const sample = Object.keys(d.per_profile).sort()
+        .flatMap(p => d.per_profile[p].untouched).slice(0, 12).map(x => '  – ' + x).join('\n');
+      const ok = confirm(
+        `RECUPERO SELEZIONE — campagna ${reviewCampaign}\n\n` +
+        `Sessioni totali: ${d.n_sessions}\n` +
+        `Toccate in revisione (→ confermate valide): ${d.n_touched}\n` +
+        `Mai toccate (→ ESCLUSE): ${d.n_untouched}\n\n` +
+        `Per profilo:\n${perProf}\n\n` +
+        `Quando le hai selezionate:\n${stamps}\n\n` +
+        `Sessioni che verranno ESCLUSE:\n${sample}${d.n_untouched > 12 ? '\n  … e altre' : ''}\n\n` +
+        `Viene creato un backup dello stato prima di scrivere. Procedo?`);
+      if (!ok) return;
+      fetch(`/api/review/${encodeURIComponent(reviewCampaign)}/recovery`,
+            {method: 'POST', headers: {'Content-Type': 'application/json'},
+             body: JSON.stringify({confirm: true})})
+        .then(r => r.json().then(d2 => ({s: r.status, d2}))).then(({s, d2}) => {
+          if (s >= 400) { alert(d2.error || 'Errore'); return; }
+          alert(`Recupero applicato.\n\n${d2.n_confirmed} sessioni confermate valide\n` +
+                `${d2.n_excluded} sessioni escluse\n\nBackup: ${d2.backup}`);
+          loadReviewSessions(); loadReviewCampaigns();
+        }).catch(() => alert('Errore di rete.'));
+    }).catch(() => alert('Errore di rete.'));
 }
 
 // ── Pre-transcodifica campagna ───────────────────────────────────────────────

@@ -961,6 +961,50 @@ python main.py --web --host 127.0.0.1        # nessuna camera necessaria
 # http://127.0.0.1:8000/validation → barra "Sorgente dati" → percorso della copia → Valida e usa
 ```
 
+### 11.14 Semantica delle azioni, recupero della selezione, modale e sezioni per profilo
+
+**Le tre azioni di massa** (una per sezione di profilo, mai cross-profilo):
+
+| Azione | Scrive | Effetto |
+| --- | --- | --- |
+| 🚫 **Escludi selezionate** | `excluded:true` + `reason` + `reviewed:true` | fuori da metriche ed export |
+| ✓ **Conferma selezionate come valide** | `excluded:false` + **`reviewed:true`** | resta inclusa, sparisce da "da rivedere" |
+| ↺ **Annulla revisione** | `excluded:false` + `reviewed:false` | torna neutra (per correggere un errore) |
+
+> La vecchia coppia "Includi/Escludi" è stata rimossa: "Includi" inviava solo `excluded:false` —
+> **già il default** — e non scriveva `reviewed`, quindi era un **no-op**: le ripetizioni sbagliate
+> restavano incluse e tutto tornava a "⚠ da rivedere". È il bug che ha fatto perdere due ore di
+> curatura. Ogni azione ora risponde con l'esito esplicito e con il contatore prima→dopo.
+
+**Contatori sempre visibili**, per sezione e totali: *N da rivedere / M confermate / K escluse*.
+Se un'azione non cambia i numeri, si vede subito.
+
+**Recupero della selezione precedente** (`↩ Recupera selezione precedente`): `update_sessions()`
+crea un record per **ogni** sessione toccata, quindi la presenza di una chiave in
+`review_state.json` è l'elenco delle sessioni selezionate in una revisione passata. Il recupero lo
+riconverte in stato reale:
+
+- `GET /api/review/<campagna>/recovery` → **anteprima obbligatoria**: per profilo, le toccate
+  (→ confermate) e le mai toccate (→ da escludere), con i conteggi e i **timestamp dei click**
+  (utili per capire se fu una curatura o un "seleziona tutto").
+- `POST .../recovery` con `{"confirm": true}` → **backup datato** `review_state.<ts>.bak.json`
+  accanto all'originale, poi toccate → `reviewed:true`, mai toccate → `excluded:true` +
+  `reason:"ripetizione non selezionata in revisione"` + `reviewed:true`.
+- **Due guardie** (409, senza scrivere nulla né creare backup): *tutte* toccate → lo stato non
+  discrimina; *nessuna* toccata → escluderebbe tutto. Rieseguirlo non peggiora lo stato.
+
+**Revisione in modale**: cliccare una sessione apre il pannello in un **overlay sopra la lista**
+(il nodo viene spostato, non ricreato: stato e video intatti). Niente `scrollIntoView`, quindi la
+**posizione nella lista e le checkbox restano dove sono**. Chiusura con **Esc** o clic fuori;
+`← prec` / `succ →` (e `↑`/`↓`) navigano **solo dentro lo stesso profilo**; aprire un'altra sessione
+a modale aperta ne cambia solo il contenuto.
+
+**Sezioni per profilo**: la lista è divisa in **STANDARD** e poi **OPTIMIZED-TX2** (l'esperimento è
+stato fatto prima con un modello e poi con l'altro), ciascuna collassabile, con conteggi,
+"seleziona tutto" e azioni di massa **proprie**. Il profilo viene dal manifest `session.json`, con
+fallback sul suffisso `_optTX2`/`_standard` del nome cartella. Il filtro a tendina resta come
+filtro aggiuntivo.
+
 ---
 
 ## 12. Bot Telegram

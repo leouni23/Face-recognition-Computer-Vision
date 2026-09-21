@@ -67,6 +67,7 @@
         <label class="text-[11px] text-gray-400 flex items-center gap-1" title="La campagna resta su disco: sparisce solo da metriche ed export.">
           <input type="checkbox" id="camp-excluded" class="accent-amber-500" onchange="toggleCampaignExcluded(this.checked)" /> escludi campagna
         </label>
+        <button onclick="recoverSelection()" class="px-3 py-1.5 rounded-lg bg-sky-800 hover:bg-sky-700 text-sm font-semibold" title="Ricostruisce inclusioni/esclusioni dalle sessioni toccate in una revisione precedente (anteprima + backup prima di scrivere)">↩ Recupera selezione precedente</button>
         <button onclick="pretranscode()" id="pretrans-btn" class="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-sm" title="Converte i video in H.264 così il player è fluido">🎞 Pre-transcodifica</button>
         <span id="pretrans-msg" class="text-xs text-gray-500"></span>
       </div>
@@ -83,11 +84,9 @@
           <select id="f-profile" class="fld text-xs" onchange="renderReviewSessions()"><option value="">tutti i profili</option></select>
         </div>
       </div>
-      <div id="review-session-list" class="text-xs overflow-x-auto"></div>
+      <!-- Le azioni di massa vivono DENTRO ogni sezione di profilo (mai cross-profilo) -->
+      <div id="review-session-list" class="text-xs"></div>
       <div class="flex flex-wrap items-center gap-2 pt-1 border-t border-gray-800/60">
-        <input id="excl-reason" class="fld flex-1 min-w-[10rem]" placeholder="motivo (es. ripetizione errata)" />
-        <button onclick="bulkExclude(true)" class="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-sm font-semibold">🚫 Escludi selezionate</button>
-        <button onclick="bulkExclude(false)" class="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-sm font-semibold">✓ Includi selezionate</button>
         <button onclick="concludeValidation()" class="ml-auto px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-bold">✅ Concludi validazione</button>
       </div>
       <div id="export-msg" class="text-xs text-gray-500"></div>
@@ -319,7 +318,26 @@
       <button onclick="stopSession()" class="big-btn bg-red-600 hover:bg-red-500 w-full">■ Ferma sessione</button>
     </section>
 
-    <!-- ══ Revisione & verità a terra (review) — spostata nel toggle di Configurazione a init ══ -->
+    <!-- ══ Modale di revisione: il pannello qui sotto ci viene spostato all'apertura di una
+         sessione, così la lista non perde né scorrimento né checkbox. Esc / clic fuori chiude. ══ -->
+    <div id="review-modal" class="hidden fixed inset-0 z-40 bg-black/70 backdrop-blur-sm p-4 overflow-y-auto"
+         onclick="if (event.target === this) closeReviewModal()">
+      <div class="max-w-6xl mx-auto bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl">
+        <div class="flex items-center gap-2 px-4 py-2 border-b border-gray-800 sticky top-0 bg-gray-900 rounded-t-2xl z-10">
+          <span id="review-modal-title" class="font-mono text-sm text-emerald-300 truncate"></span>
+          <div class="ml-auto flex items-center gap-1.5">
+            <button onclick="stepReviewSession(-1)" class="px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-xs" title="sessione precedente (stesso profilo) — ↑">← prec</button>
+            <button onclick="stepReviewSession(1)" class="px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-xs" title="sessione successiva (stesso profilo) — ↓">succ →</button>
+            <button onclick="closeReviewModal()" class="px-2 py-1 rounded bg-gray-800 hover:bg-red-900 text-xs" title="chiudi (Esc)">✕</button>
+          </div>
+        </div>
+        <div id="review-modal-body" class="p-4"></div>
+      </div>
+    </div>
+
+    <!-- ══ Revisione & verità a terra (review) — spostata nel toggle di Configurazione a init,
+         e nella modale qui sopra quando si apre una sessione ══ -->
+    <div id="gt-review-home">
     <section id="gt-review-section" class="space-y-3">
       <div class="flex flex-wrap items-center gap-2">
         <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Revisione &amp; verità a terra</h2>
@@ -418,6 +436,7 @@
         </div>
       </div>
     </section>
+    </div><!-- /gt-review-home -->
 
     <!-- ══ Metriche ══ -->
     <section class="space-y-3">
@@ -1073,8 +1092,8 @@ document.getElementById('wiz-day').textContent =
 // così non disturba il flusso nuova sessione e non parte per sbaglio.
 (function relocateGtReview(){
   const host = document.getElementById('gt-review-host'), sec = document.getElementById('gt-review-section');
-  if (host && sec) host.appendChild(sec);
-})();
+  if (host && sec) host.appendChild(sec);   // il pannello vive nel toggle di Configurazione…
+})();                                       // …e closeReviewModal() lo rimette lì (vedi review.js)
 (function prefillDest(){
   const last = localStorage.getItem('faceid_last_dest');
   if (last) { document.getElementById('dest-path').value = last; validateDest(); }

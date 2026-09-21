@@ -219,6 +219,110 @@ def update_sessions(folder: str, session_ids: List[str], **fields) -> dict:
         return _save_state(folder, state)
 
 
+# ── Recovery of a curation lost to the old include/exclude semantics ──────────────
+# "Includi selezionate" used to send {excluded: false} — already the default — and never wrote
+# `reviewed`, so it was a no-op on the analysis and every session fell back to "da rivedere".
+# The curation is NOT lost though: update_sessions() creates a record for EVERY session it touches,
+# so the presence of a key in review_state.json is exactly the list of sessions the operator
+# selected. This turns that evidence back into a real inclusion/exclusion, explicitly and
+# reversibly: preview first, backup before writing, and two guards that refuse ambiguous states.
+
+RECOVERY_REASON = "ripetizione non selezionata in revisione"
+
+
+def recovery_preview(folder: str) -> dict:
+    """What a recovery would do, WITHOUT writing: per profile, the sessions that were touched
+    (kept) and those never touched (candidates for exclusion), plus the guard verdicts."""
+    sessions = review_sessions(folder)
+    state = load_state(folder)
+    keys = set(state.get("sessions") or {})
+    touched, untouched = [], []
+    per_profile: Dict[str, dict] = {}
+    for s in sessions:
+        prof = s.get("profile") or "?"
+        entry = per_profile.setdefault(prof, {"touched": [], "untouched": []})
+        if s["session_id"] in keys:
+            touched.append(s["session_id"])
+            entry["touched"].append(s["session_id"])
+        else:
+            untouched.append(s["session_id"])
+            entry["untouched"].append(s["session_id"])
+    # Timestamps prove whether the state came from a real curation (a few bulk clicks, one per
+    # profile) rather than a single "select all" — surfaced so the operator can judge.
+    stamps: Dict[str, int] = {}
+    for sid in touched:
+        ts = ((state["sessions"].get(sid) or {}).get("updated_at") or "?")[:19]
+        stamps[ts] = stamps.get(ts, 0) + 1
+    blocked = None
+    if not sessions:
+        blocked = "Nessuna sessione in questa campagna."
+    elif not touched:
+        blocked = ("Nessuna sessione risulta toccata durante la revisione: applicare il recupero "
+                   "escluderebbe TUTTE le sessioni. Operazione rifiutata.")
+    elif not untouched:
+        already = sum(1 for s in sessions if s.get("excluded"))
+        if already and all(s.get("reviewed") for s in sessions):
+            blocked = ("Recupero già applicato: {} sessioni escluse, nessuna da rivedere. "
+                       "Non c'è altro da recuperare.".format(already))
+        else:
+            blocked = ("Tutte le sessioni risultano toccate: lo stato non discrimina fra tenute e "
+                       "scartate (caso 'seleziona tutto'). Operazione rifiutata.")
+    return {
+        "folder": folder,
+        "can_apply": blocked is None,
+        "blocked_reason": blocked,
+        "n_sessions": len(sessions),
+        "n_touched": len(touched),
+        "n_untouched": len(untouched),
+        "touch_timestamps": [{"at": k, "n": v} for k, v in sorted(stamps.items())],
+        "per_profile": {p: {"touched": sorted(v["touched"]),
+                            "untouched": sorted(v["untouched"]),
+                            "n_touched": len(v["touched"]),
+                            "n_untouched": len(v["untouched"])}
+                        for p, v in sorted(per_profile.items())},
+        "reason": RECOVERY_REASON,
+    }
+
+
+def backup_state(folder: str) -> Optional[str]:
+    """Timestamped copy of review_state.json next to the original, before any bulk rewrite."""
+    d = campaign_dir(folder)
+    if d is None:
+        return None
+    src = d / REVIEW_STATE_FILE
+    if not src.is_file():
+        return None
+    dst = d / "review_state.{}.bak.json".format(datetime.now().strftime("%Y%m%d_%H%M%S"))
+    try:
+        _atomic_write(dst, src.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise RuntimeError("Backup dello stato fallito ({}): non procedo".format(exc))
+    return str(dst)
+
+
+def recovery_apply(folder: str) -> dict:
+    """Turn the recorded curation into real state: touched → reviewed (kept), never touched →
+    excluded + reviewed. Backs up first; idempotent (re-running changes nothing)."""
+    preview = recovery_preview(folder)
+    if not preview["can_apply"]:
+        raise ValueError(preview["blocked_reason"])
+    backup = backup_state(folder)
+    touched, untouched = [], []
+    for p in preview["per_profile"].values():
+        touched.extend(p["touched"])
+        untouched.extend(p["untouched"])
+    if touched:
+        update_sessions(folder, touched, reviewed=True, excluded=False)
+    if untouched:
+        update_sessions(folder, untouched, excluded=True, reviewed=True, reason=RECOVERY_REASON)
+    logger.success("[Review] Recupero selezione '{}': {} confermate, {} escluse (backup: {})"
+                   .format(folder, len(touched), len(untouched), backup))
+    return {"folder": folder, "backup": backup,
+            "n_confirmed": len(touched), "n_excluded": len(untouched),
+            "confirmed": sorted(touched), "excluded": sorted(untouched),
+            "per_profile": preview["per_profile"]}
+
+
 def flag_campaign(folder: str, excluded: Optional[bool] = None, reason: Optional[str] = None,
                   is_test: Optional[bool] = None) -> dict:
     """Mark a whole campaign as excluded / test — persisted, never a deletion."""
