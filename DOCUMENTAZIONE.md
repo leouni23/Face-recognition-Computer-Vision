@@ -1005,6 +1005,45 @@ stato fatto prima con un modello e poi con l'altro), ciascuna collassabile, con 
 fallback sul suffisso `_optTX2`/`_standard` del nome cartella. Il filtro a tendina resta come
 filtro aggiuntivo.
 
+### 11.15 Due livelli di lettura: FRAME e EVENTO
+
+Il pannello di revisione mostra **due livelli distinti**, ed è essenziale non confonderli:
+
+- **FRAME CORRENTE** — la detection del **singolo fotogramma** visualizzato: identità predetta,
+  `raw_cosine_distance`, **accettato/respinto** rispetto alla soglia di sessione, `face_id` (tutti
+  i volti, se il frame ne ha più d'uno). Cambia a ogni frame. Se per quel `frame_index` non esiste
+  alcuna riga in `detections.jsonl` il pannello dice **"nessun volto rilevato in questo frame"**:
+  è un fallimento del *detector*, diverso da un volto **respinto** dal *matcher* (che compare come
+  "Sconosciuto").
+- **EVENTO (aggregato della traccia)** — predizione **a maggioranza**, distanza media, verdetto e
+  range frame. **È questo il valore che entra nelle metriche**, e per definizione **non cambia**
+  scorrendo i frame dentro la stessa traccia. Accanto c'è il **breakdown** `N corretti / M swap /
+  K mancati su T frame`, che rende evidente perché il verdetto è quello.
+
+**Perché l'unità di analisi è l'evento e non il frame.** I frame consecutivi di una stessa traccia
+sono osservazioni **correlate**: contarli come indipendenti sarebbe pseudo-replicazione e
+gonfierebbe artificialmente la numerosità campionaria. L'evento (un attraversamento) è l'unità
+primaria secondo ISO/IEC 19795 e NIST FRVT; backend (`_mate_decision` in
+`core/validation_metrics.py`) e UI (`derivedVerdict`) usano la **stessa** regola di maggioranza.
+Esempio reale: su posa **laterale-90** una sessione con 2 riconoscimenti su 16 frame produce
+legittimamente `mate_miss`, pur avendo qualche frame corretto — ed è esattamente il risultato
+scientifico atteso (sensibilità alla posa), non un errore di calcolo.
+
+**Seek frame-accurate.** Il player deve mostrare *esattamente* il fotogramma descritto dal
+pannello. Tre difese:
+
+1. la transcodifica H.264 usa **`-g 1`** (ogni fotogramma è keyframe): con il GOP di default una
+   clip breve aveva **un solo keyframe**, e il seek del browser non era garantito esatto. Costa
+   ~2,5× in dimensione su una cache rigenerabile (`~/.cache/faceid-review/`), e la chiave di cache
+   include la **versione di codifica**, così un cambio di parametri rigenera i file vecchi;
+2. la ricerca punta al **centro** del fotogramma — `t = (pos + 0.5)/FPS` — invece del bordo
+   `pos/FPS`, che in virgola mobile può cadere nel fotogramma precedente (off-by-one silenzioso);
+3. accanto al frame richiesto viene mostrato il **fotogramma effettivamente letto**
+   (`frame 7 · letto 7 ✓`, oppure `⚠ letto 6`): uno scarto resta visibile invece che silenzioso.
+
+La conversione `frame_index` globale ↔ posizione nel video applica l'offset `first_frame` del
+segmento servito (esposto da `/api/review/video/<sid>/<cam>/status`).
+
 ---
 
 ## 12. Bot Telegram

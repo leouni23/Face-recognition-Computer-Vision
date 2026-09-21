@@ -831,6 +831,12 @@ def review_video_status(session_id: str, camera_id: str):
     st = status(files[0])
     st["segments"] = len(files)
     st["ffmpeg"] = bool(ffmpeg_path())
+    # Offset of the served segment: the player maps a GLOBAL frame_index to a position inside this
+    # video as `frame_index - first_frame`. Today every session is single-segment with first_frame
+    # 0, but the player must not assume it.
+    segs = _segments_index(d, camera_id)
+    st["first_frame"] = (segs[0].get("first_frame") if segs else 0) or 0
+    st["last_frame"] = (segs[0].get("last_frame") if segs else None)
     return jsonify(st)
 
 

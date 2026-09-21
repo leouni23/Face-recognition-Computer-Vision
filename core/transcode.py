@@ -36,13 +36,19 @@ def ffmpeg_path() -> Optional[str]:
     return _ffmpeg_checked or None
 
 
+# Bumped whenever the encoding parameters change, so files cached by an older version are
+# regenerated instead of being served with the old (non seekable) GOP structure.
+_ENCODING_VERSION = "v2-allkey"
+
+
 def _key(src: Path) -> str:
-    """Cache key from path + size + mtime: a re-copied or edited source re-transcodes on its own."""
+    """Cache key from path + size + mtime (+ encoding version): a re-copied or edited source, or a
+    change in the encode itself, re-transcodes on its own."""
     try:
         st = src.stat()
-        raw = "{}|{}|{}".format(src.resolve(), st.st_size, int(st.st_mtime))
+        raw = "{}|{}|{}|{}".format(src.resolve(), st.st_size, int(st.st_mtime), _ENCODING_VERSION)
     except OSError:
-        raw = str(src)
+        raw = "{}|{}".format(src, _ENCODING_VERSION)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 
@@ -91,8 +97,12 @@ def ensure_h264(src: Path, timeout: int = 1800) -> dict:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(".part.mp4")
         _jobs[key] = {"state": "running", "src": str(src)}
+        # -g 1: EVERY frame is a keyframe. The review is a frame-by-frame job, and with the
+        # default GOP a short clip gets a single keyframe, so a browser seek is not guaranteed to
+        # land on the requested frame — the panel would describe one frame while showing another.
+        # Costs ~2.5x the size on a regenerable cache; correctness wins here.
         cmd = [exe, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
-               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-g", "1",
                "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", str(tmp)]
         try:
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

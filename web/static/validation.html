@@ -402,6 +402,13 @@
           <div id="no-video-note" class="hidden rounded-xl bg-gray-950 border border-gray-800 p-3 text-xs text-gray-400">
             Sessione <b>senza video</b>: nessuna immagine è stata salvata. Rivedi gli eventi nella timeline a destra e correggi la verità a terra da lì (selezione evento → identità). Le metriche si calcolano normalmente.
           </div>
+          <!-- FRAME CORRENTE: la detection del solo fotogramma mostrato (cambia a ogni frame).
+               Va letto insieme al blocco EVENTO qui sotto, che è invece l'aggregato della traccia. -->
+          <div class="bg-gray-950 rounded-xl p-3 space-y-1 border border-gray-800">
+            <div class="text-[11px] text-emerald-300 font-semibold">FRAME CORRENTE
+              <span class="text-gray-500 font-normal">— cosa ha rilevato il software in questo singolo fotogramma</span></div>
+            <div id="frame-detail" class="space-y-0.5"></div>
+          </div>
           <div id="event-label-bar" class="bg-gray-900 rounded-xl p-3 space-y-2 min-h-[3rem]">
             <p class="text-xs text-gray-600">Scegli una sessione e scorri agli eventi.</p>
           </div>

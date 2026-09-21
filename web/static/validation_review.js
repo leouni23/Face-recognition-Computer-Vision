@@ -153,6 +153,7 @@ function setupVideo() {
   if (!sessionId || noVideo || curCam == null) return;
   fetch(`/api/review/video/${encodeURIComponent(sessionId)}/${encodeURIComponent(curCam)}/status`)
     .then(r => r.json()).then(st => {
+      videoFirstFrame = Number.isFinite(st.first_frame) ? st.first_frame : 0;
       if (st.state === 'no_video') return;
       if (!st.ffmpeg) {
         if (status) {
@@ -179,10 +180,13 @@ function setupVideo() {
         setFrame(curIndex);
       };
       videoEl.ontimeupdate = () => {          // video → tabella (sync bidirezionale)
-        if (!useVideo || syncingFromVideo) return;
-        const idx = Math.round(videoEl.currentTime * FPS);
-        if (Math.abs(idx - curIndex) >= 1) { syncingFromVideo = true; setFrame(idx); syncingFromVideo = false; }
+        if (!useVideo) return;
+        if (syncingFromVideo) { renderFrameInfo(); return; }
+        const idx = timeToFrame(videoEl.currentTime);
+        if (idx !== curIndex) { syncingFromVideo = true; setFrame(idx); syncingFromVideo = false; }
+        else renderFrameInfo();               // aggiorna il "fotogramma letto" anche senza salti
       };
+      videoEl.onseeked = () => renderFrameInfo();
       videoEl.src = `/api/review/video/${encodeURIComponent(sessionId)}/${encodeURIComponent(curCam)}`;
       videoEl.load();
     }).catch(() => {});
@@ -191,6 +195,81 @@ function setupVideo() {
 function setPlayRate(r) { if (videoEl) videoEl.playbackRate = r; }
 
 // ── Frame player ─────────────────────────────────────────────────────────────
+// frame_index GLOBALE ↔ posizione nel video servito. `videoFirstFrame` arriva da segments.json
+// (oggi sempre 0: tutte le sessioni sono a segmento singolo, verificato sull'archivio).
+let videoFirstFrame = 0;
+// Cerco il CENTRO del fotogramma, non il bordo: t = idx/FPS cade esattamente sulla soglia e in
+// virgola mobile può finire nel fotogramma precedente (off-by-one silenzioso).
+function frameToTime(idx) { return (Math.max(0, idx - videoFirstFrame) + 0.5) / FPS; }
+function timeToFrame(t) { return videoFirstFrame + Math.floor(t * FPS); }
+
+// Indice del fotogramma REALMENTE mostrato dal <video>: se non coincide con quello richiesto lo
+// si vede, invece di descrivere un frame e mostrarne un altro.
+function displayedFrame() {
+  if (!useVideo || !videoEl || !Number.isFinite(videoEl.currentTime)) return null;
+  return timeToFrame(videoEl.currentTime);
+}
+
+function renderFrameInfo() {
+  const el = document.getElementById('frame-info');
+  if (!el) return;
+  const shown = displayedFrame();
+  let tail = '';
+  if (shown !== null) {
+    tail = shown === curIndex
+      ? ` · letto ${shown} ✓`
+      : ` · <span class="text-amber-400">⚠ letto ${shown}</span>`;
+  }
+  el.innerHTML = `frame ${curIndex} / ${maxIndex} · ${vtime(curIndex)}${tail}`;
+}
+
+// ── Blocco FRAME CORRENTE ────────────────────────────────────────────────────
+// Le detection del SOLO frame visualizzato. Distingue tre esiti che oggi si confondono:
+// volto accettato, volto respinto dalla soglia, e nessun volto rilevato dal detector.
+function detectionsAtFrame(idx) {
+  return detections.filter(d => String(d.camera_id) === String(curCam) && d.frame_index === idx);
+}
+
+function renderFrameBlock() {
+  const box = document.getElementById('frame-detail');
+  if (!box) return;
+  const rows = detectionsAtFrame(curIndex);
+  if (!rows.length) {
+    box.innerHTML = '<div class="text-xs text-gray-400">⚪ <b>nessun volto rilevato in questo frame</b> '
+      + '<span class="text-gray-600">(il detector non ha trovato volti — diverso da un volto respinto)</span></div>';
+    return;
+  }
+  box.innerHTML = rows.map(d => {
+    const dist = d.raw_cosine_distance;
+    const accepted = d.predicted_person_id != null;
+    const badge = accepted
+      ? '<span class="text-emerald-400 font-semibold">✅ ACCETTATO</span>'
+      : '<span class="text-amber-400 font-semibold">⛔ RESPINTO</span>';
+    return `<div class="text-xs text-gray-300 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+      <span class="text-gray-500">volto #${d.face_id}</span>
+      <span>predetto <b>${esc(d.predicted_identity || '—')}</b></span>
+      <span class="tabular-nums">dist ${dist == null ? '—' : dist.toFixed(3)}</span>
+      ${badge}
+      <span class="text-gray-600">soglia ${threshold == null ? '—' : threshold}</span>
+    </div>`;
+  }).join('');
+}
+
+// Perché il verdetto d'evento è quello: conteggio dei frame per esito (stessa logica di
+// derivedVerdict, nessun ricalcolo delle metriche).
+function segBreakdown(seg) {
+  const t = segTruth(seg);
+  const preds = seg.idxs.map(i => detections[i].predicted_person_id);
+  if (!t) return null;
+  if (t.non_mate) {
+    const acc = preds.filter(p => p != null).length;
+    return `${acc} accettati / ${preds.length - acc} respinti su ${preds.length} frame`;
+  }
+  let correct = 0, swap = 0, miss = 0;
+  preds.forEach(p => { if (p == null) miss++; else if (p === t.true_person_id) correct++; else swap++; });
+  return `${correct} corretti / ${swap} swap / ${miss} mancati su ${preds.length} frame`;
+}
+
 function setFrame(i) {
   if (!sessionId || curCam == null) return;
   curIndex = Math.max(0, Math.min(maxIndex, i));
@@ -198,11 +277,12 @@ function setFrame(i) {
     document.getElementById('frame-img').src =
       `/api/validation/${encodeURIComponent(sessionId)}/frame/${encodeURIComponent(curCam)}/${curIndex}`;
   } else if (useVideo && videoEl && !syncingFromVideo) {
-    const t = curIndex / FPS;                 // tabella/slider → video
-    if (Math.abs(videoEl.currentTime - t) > 1 / FPS) videoEl.currentTime = t;
+    const t = frameToTime(curIndex);          // tabella/slider → video
+    if (Math.abs(videoEl.currentTime - t) > 0.5 / FPS) videoEl.currentTime = t;
   }
   document.getElementById('frame-slider').value = curIndex;
-  document.getElementById('frame-info').textContent = `frame ${curIndex} / ${maxIndex} · ${vtime(curIndex)}`;
+  renderFrameInfo();
+  renderFrameBlock();
   renderEventBar();
   const seg = currentSegment();
   document.querySelectorAll('#rows tr').forEach(tr =>
@@ -268,10 +348,14 @@ function renderEventBar() {
   const subjBtns = gallery.map((g, k) =>
     `<button class="truth-btn ${t && t.true_person_id === g.id ? 'ring-2 ring-emerald-400' : ''}"
        onclick="assignTruth('${g.id}')">${k < 9 ? `<span class="text-gray-500 mr-1">${k + 1}</span>` : ''}${esc(g.name)}</button>`).join('');
+  const breakdown = segBreakdown(seg);
   bar.innerHTML = `
-    <div class="text-[11px] text-gray-500">Evento · volto ${seg.faceId} · frame ${seg.first}–${seg.last} (${vtime(seg.first)}–${vtime(seg.last)}) · ${seg.nFrames} frame${seg.preset ? ' · cond. ' + esc(seg.preset) : ''}</div>
-    <div class="text-xs text-gray-300">predetto <b>${esc(seg.pred)}</b> · dist media ${seg.meanDist == null ? '—' : seg.meanDist.toFixed(3)}
+    <div class="text-[11px] text-sky-300 font-semibold">EVENTO — aggregato dell'intera traccia
+      <span class="text-gray-500 font-normal">(è questo il valore che entra nelle metriche, non il singolo frame)</span></div>
+    <div class="text-[11px] text-gray-500">volto ${seg.faceId} · frame ${seg.first}–${seg.last} (${vtime(seg.first)}–${vtime(seg.last)}) · ${seg.nFrames} frame con volto${seg.preset ? ' · cond. ' + esc(seg.preset) : ''}</div>
+    <div class="text-xs text-gray-300">predetto <b>${esc(seg.pred)}</b> <span class="text-gray-600">(maggioranza)</span> · dist media ${seg.meanDist == null ? '—' : seg.meanDist.toFixed(3)}
       ${vm ? `· <span style="color:${vm.color}">● ${vm.label}</span>` : '· <span class="text-gray-500">senza verità</span>'}</div>
+    ${breakdown ? `<div class="text-[11px] text-gray-400">breakdown: <b>${esc(breakdown)}</b> <span class="text-gray-600">← perché il verdetto è questo</span></div>` : ''}
     <div class="text-[11px] text-gray-500 pt-1">Correggi l'identità vera dell'evento:</div>
     <div class="flex flex-wrap gap-1.5">
       ${subjBtns || '<span class="text-[11px] text-amber-500">galleria non disponibile</span>'}
