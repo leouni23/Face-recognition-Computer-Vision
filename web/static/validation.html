@@ -28,6 +28,24 @@
     .big-btn { padding:.85rem 1.4rem; border-radius:.9rem; font-weight:700; font-size:1rem; transition:all .12s; cursor:pointer; }
     details>summary { cursor:pointer; list-style:none; }
     details>summary::-webkit-details-marker { display:none; }
+
+    /* ── Player: normale / teatro / schermo intero ─────────────────────────────
+       Il video non deve mai sfondare l'altezza utile: senza max-height i controlli
+       e i blocchi FRAME/EVENTO finiscono fuori schermo su un video 1080p. */
+    #review-video { max-height:62vh; object-fit:contain; background:#000; }
+
+    /* Teatro: la card della modale perde il limite di larghezza e la griglia
+       passa a una colonna (la timeline scorre sotto il player). */
+    body.theater #review-modal-card { max-width:none; }
+    body.theater #review-grid { grid-template-columns:1fr; }
+    body.theater #review-video { max-height:78vh; }
+
+    /* Schermo intero: il bersaglio è #review-stage (NON il solo <video>), così
+       restano visibili controlli, slider, FRAME CORRENTE, EVENTO e i tasti verdetto. */
+    #review-stage:fullscreen { background:#000; padding:1rem; overflow-y:auto; }
+    #review-stage:fullscreen #review-video { max-height:calc(100vh - 230px); }
+    #review-stage:-webkit-full-screen { background:#000; padding:1rem; overflow-y:auto; }
+    #review-stage:-webkit-full-screen #review-video { max-height:calc(100vh - 230px); }
   </style>
 </head>
 <body class="text-gray-100 min-h-screen">
@@ -322,7 +340,7 @@
          sessione, così la lista non perde né scorrimento né checkbox. Esc / clic fuori chiude. ══ -->
     <div id="review-modal" class="hidden fixed inset-0 z-40 bg-black/70 backdrop-blur-sm p-4 overflow-y-auto"
          onclick="if (event.target === this) closeReviewModal()">
-      <div class="max-w-6xl mx-auto bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl">
+      <div id="review-modal-card" class="max-w-6xl mx-auto bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl">
         <div class="flex items-center gap-2 px-4 py-2 border-b border-gray-800 sticky top-0 bg-gray-900 rounded-t-2xl z-10">
           <span id="review-modal-title" class="font-mono text-sm text-emerald-300 truncate"></span>
           <div class="ml-auto flex items-center gap-1.5">
@@ -349,8 +367,8 @@
         <button onclick="refreshSessions()" class="text-xs text-gray-500 hover:text-gray-300">↻</button>
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
-        <div class="space-y-2">
+      <div id="review-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        <div id="review-stage" class="space-y-2">
           <div class="flex items-center gap-2 text-sm text-gray-400">
             <span>Camera</span>
             <select id="cam-sel" onchange="switchCamera()" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 focus:outline-none"></select>
@@ -382,10 +400,12 @@
                   <option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option>
                 </select>
               </label>
+              <button onclick="toggleTheater()" id="theater-btn" class="ctrl text-xs" title="modalità teatro: il player prende tutta la larghezza (T)">▭ Teatro</button>
+              <button onclick="toggleFullscreen()" id="fs-btn" class="ctrl text-xs" title="schermo intero: video + controlli + verdetto (F)">⛶ Schermo intero</button>
             </div>
             <input id="frame-slider" type="range" min="0" max="0" value="0" oninput="setFrame(+this.value)" class="w-full" />
             <p class="text-[11px] text-gray-500">
-              <kbd>←</kbd> <kbd>→</kbd> frame · ⏮⏭ eventi · <kbd>1</kbd>…<kbd>9</kbd> iscritto · <kbd>0</kbd> Non-mate (correzione manuale dell'evento)
+              <kbd>←</kbd> <kbd>→</kbd> frame · ⏮⏭ eventi · <kbd>1</kbd>…<kbd>9</kbd> iscritto · <kbd>0</kbd> Non-mate (correzione manuale dell'evento) · <kbd>T</kbd> teatro · <kbd>F</kbd> schermo intero
             </p>
             <!-- Verdetto di sessione: cosa si sta confermando davvero -->
             <div class="bg-gray-950 rounded-xl p-2 border border-gray-800 space-y-1">

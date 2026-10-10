@@ -322,6 +322,10 @@ function closeReviewModal() {
   // il contenitore originale della pagina.
   const home = document.getElementById('gt-review-host') || document.getElementById('gt-review-home');
   if (!ov || !modalOpen) return;
+  // Spostare il nodo mentre è in fullscreen lo annullerebbe in modo sporco: esci prima.
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    (document.exitFullscreen || document.webkitExitFullscreen || function () {}).call(document);
+  }
   if (host && home) home.appendChild(host);   // rimetto il pannello al suo posto
   ov.classList.add('hidden');
   document.body.style.overflow = '';
@@ -343,6 +347,9 @@ function stepReviewSession(dir) {
 }
 
 document.addEventListener('keydown', e => {
+  // In schermo intero Esc deve SOLO uscire dal fullscreen (ci pensa il browser): se chiudessimo
+  // anche la modale si perderebbe la sessione aperta con un solo tasto.
+  if (e.key === 'Escape' && (document.fullscreenElement || document.webkitFullscreenElement)) return;
   if (e.key === 'Escape' && modalOpen) { e.preventDefault(); closeReviewModal(); }
 });
 

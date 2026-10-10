@@ -194,6 +194,51 @@ function setupVideo() {
 
 function setPlayRate(r) { if (videoEl) videoEl.playbackRate = r; }
 
+// ── Ingrandimento del player: teatro e schermo intero (stile YouTube) ────────
+// Il bersaglio del fullscreen è #review-stage, non il solo <video>: così restano a schermo
+// anche i controlli, lo slider, FRAME CORRENTE, EVENTO e i tasti verdetto.
+function reviewStage() { return document.getElementById('review-stage'); }
+function isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+
+function toggleTheater() {
+  const on = document.body.classList.toggle('theater');
+  try { localStorage.setItem('faceid_theater', on ? '1' : '0'); } catch (e) {}
+  const b = document.getElementById('theater-btn');
+  if (b) b.textContent = on ? '▭ Esci da teatro' : '▭ Teatro';
+}
+
+function toggleFullscreen() {
+  const el = reviewStage();
+  if (!el) return;
+  if (isFullscreen()) {
+    (document.exitFullscreen || document.webkitExitFullscreen || function () {}).call(document);
+  } else {
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) {
+      // requestFullscreen può rifiutare (gesto utente mancante, permessi): non deve rompere nulla
+      try { Promise.resolve(req.call(el)).catch(() => {}); } catch (e) {}
+    }
+  }
+}
+
+function onFullscreenChange() {
+  const b = document.getElementById('fs-btn');
+  if (b) b.textContent = isFullscreen() ? '⛶ Esci da schermo intero' : '⛶ Schermo intero';
+}
+document.addEventListener('fullscreenchange', onFullscreenChange);
+document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+
+// Stato teatro ripristinato fra una sessione e l'altra
+(function restoreTheater() {
+  try {
+    if (localStorage.getItem('faceid_theater') === '1') {
+      document.body.classList.add('theater');
+      const b = document.getElementById('theater-btn');
+      if (b) b.textContent = '▭ Esci da teatro';
+    }
+  } catch (e) {}
+})();
+
 // ── Frame player ─────────────────────────────────────────────────────────────
 // frame_index GLOBALE ↔ posizione nel video servito. `videoFirstFrame` arriva da segments.json
 // (oggi sempre 0: tutte le sessioni sono a segmento singolo, verificato sull'archivio).
@@ -402,6 +447,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowRight') { e.preventDefault(); stopPlay(); setFrame(curIndex + 1); return; }
   if (e.key === 'ArrowLeft')  { e.preventDefault(); stopPlay(); setFrame(curIndex - 1); return; }
   if (e.key === ' ') { e.preventDefault(); playPause(); return; }
+  if (e.key === 'f' || e.key === 'F') { e.preventDefault(); toggleFullscreen(); return; }
+  if (e.key === 't' || e.key === 'T') { e.preventDefault(); toggleTheater(); return; }
   // Verdetto rapido di sessione + navigazione fra sessioni (revisione offline)
   if (e.key === 'c' || e.key === 'C') { e.preventDefault(); verdictOk(); return; }
   if (e.key === 'x' || e.key === 'X') { e.preventDefault(); verdictMismatch(); return; }

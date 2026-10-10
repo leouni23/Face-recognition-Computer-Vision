@@ -1044,6 +1044,38 @@ pannello. Tre difese:
 La conversione `frame_index` globale ↔ posizione nel video applica l'offset `first_frame` del
 segmento servito (esposto da `/api/review/video/<sid>/<cam>/status`).
 
+### 11.16 Due modi di visualizzazione: teatro e schermo intero
+
+Nella modale il player sta in una colonna su due: per giudicare *chi c'era davvero* in un
+fotogramma spesso serve vederlo grande. Due modi, nella barra dei controlli e da tastiera:
+
+- **▭ Teatro** (`T`) — la card perde il limite di larghezza, la griglia passa a una colonna sola
+  (video sopra, timeline degli eventi sotto) e il video arriva a `78vh`. Resta **dentro la pagina**:
+  si continua a scorrere, si vedono i grafici. Lo stato è ricordato in `localStorage`
+  (`faceid_theater`), così passando da una sessione all'altra non va riattivato.
+- **⛶ Schermo intero** (`F`) — Fullscreen API su **`#review-stage`**, non sul `<video>`: in
+  schermo intero restano quindi visibili **video, barra dei controlli, slider dei frame, FRAME
+  CORRENTE, EVENTO e i tasti di verdetto C/X/E**. Andando in fullscreen sul solo elemento video si
+  sarebbero persi tutti i controlli custom (il browser avrebbe mostrato i suoi).
+
+Niente librerie: tre `id` aggiunti al markup esistente (`review-modal-card`, `review-grid`,
+`review-stage`), regole CSS su `body.theater` e `:fullscreen` (+ `:-webkit-full-screen`), e
+`max-height` con `object-fit: contain` in tutti gli stati perché il video non sfondi mai il
+contenitore. **Transcodifica, cache e seek frame-accurate non cambiano**: è lo stesso `<video>`.
+
+**Le due trappole, chiuse.** (1) Spostare un nodo DOM mentre è in fullscreen annulla il fullscreen:
+`showReviewModal()` sposta il pannello **solo** quando la modale è chiusa, quindi passare alla
+sessione precedente/successiva ne cambia solo il contenuto e lo schermo intero **sopravvive**;
+`closeReviewModal()` esce dal fullscreen **prima** di rimettere il nodo al suo posto. (2) `Esc` in
+fullscreen deve solo uscire dal fullscreen — se chiudesse anche la modale si perderebbe la sessione
+aperta con un tasto solo: la guardia nel `keydown` ignora `Esc` finché `document.fullscreenElement`
+è attivo, un secondo `Esc` chiude la modale.
+
+**Non-regressione verificata sull'archivio reale**: export rigenerato e confrontato byte-a-byte con
+il precedente — `comparison.json|csv`, `metrics_*.json`, `det_*.csv`, `cmc_*.csv` **identici** (8/8);
+`review_state.json` invariato (stesso SHA-1) dopo lo stop e il riavvio dell'app, con i 36 verdetti e
+le 8 esclusioni al loro posto. Nessun file Python toccato.
+
 ---
 
 ## 12. Bot Telegram
