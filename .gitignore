@@ -70,3 +70,13 @@ PROTOCOL.md
 # Cache/stato locale della revisione offline
 .cache/
 faceid-review.json
+
+# Fermo immagine di volti: scripts/diag_face_size.py --save-dir scrive diag_NN_NN.jpg,
+# e un --save-dir dentro il working tree sarebbe committabile. Le figure della
+# documentazione restano permesse (docs/).
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.webp
+!docs/**
